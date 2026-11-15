@@ -30,6 +30,7 @@ type AgentBinding struct {
   Bin   string
   Model string
   Skill string
+  Args  string
 }
 
 type TokenStats struct {
@@ -70,24 +71,30 @@ func main() {
   // Bindings desacoplados: troque via .forge/models.env ou flags CLI
   onbBin := flag.String("onboarder-bin", getEnv("FORGE_ONBOARDER_BIN", "claude"), "Binário da Forge 0 (ONBOARDER)")
   onbModel := flag.String("onboarder-model", getEnv("FORGE_ONBOARDER_MODEL", "opus"), "Modelo da Forge 0 (ONBOARDER)")
+  onbArgs := flag.String("onboarder-args", getEnv("FORGE_ONBOARDER_ARGS", ""), "Argumentos extras do CLI da Forge 0 (ONBOARDER)")
 
   archBin := flag.String("architect-bin", getEnv("FORGE_ARCHITECT_BIN", "claude"), "Binário da Forge 1 (ARCHITECT)")
   archModel := flag.String("architect-model", getEnv("FORGE_ARCHITECT_MODEL", "opus"), "Modelo da Forge 1 (ARCHITECT)")
   archSkill := flag.String("architect-skill", getEnv("FORGE_ARCHITECT_SKILL", "superpowers"), "Skill da Forge 1 (ARCHITECT)")
+  archArgs := flag.String("architect-args", getEnv("FORGE_ARCHITECT_ARGS", ""), "Argumentos extras do CLI da Forge 1 (ARCHITECT)")
 
   skepBin := flag.String("skeptic-bin", getEnv("FORGE_SKEPTIC_BIN", "agy"), "Binário da Forge 2 (SKEPTIC)")
   skepModel := flag.String("skeptic-model", getEnv("FORGE_SKEPTIC_MODEL", "GPT-OSS 120B (Medium)"), "Modelo da Forge 2 (SKEPTIC)")
   skepSkill := flag.String("skeptic-skill", getEnv("FORGE_SKEPTIC_SKILL", "elephant-goldfish-model"), "Skill da Forge 2 (SKEPTIC)")
+  skepArgs := flag.String("skeptic-args", getEnv("FORGE_SKEPTIC_ARGS", ""), "Argumentos extras do CLI da Forge 2 (SKEPTIC)")
 
   buildBin := flag.String("builder-bin", getEnv("FORGE_BUILDER_BIN", "agy"), "Binário da Forge 3 (BUILDER)")
   buildModel := flag.String("builder-model", getEnv("FORGE_BUILDER_MODEL", "Gemini 3.8 Flash"), "Modelo da Forge 3 (BUILDER)")
+  buildArgs := flag.String("builder-args", getEnv("FORGE_BUILDER_ARGS", ""), "Argumentos extras do CLI da Forge 3 (BUILDER)")
 
   sentBin := flag.String("sentinel-bin", getEnv("FORGE_SENTINEL_BIN", "agy"), "Binário da Forge 4B (SENTINEL)")
   sentModel := flag.String("sentinel-model", getEnv("FORGE_SENTINEL_MODEL", "Claude Sonnet 4.6 (Thinking)"), "Modelo da Forge 4B (SENTINEL)")
   sentSkill := flag.String("sentinel-skill", getEnv("FORGE_SENTINEL_SKILL", "cloudflare/security-audit-skill"), "Skill da Forge 4B (SENTINEL)")
+  sentArgs := flag.String("sentinel-args", getEnv("FORGE_SENTINEL_ARGS", ""), "Argumentos extras do CLI da Forge 4B (SENTINEL)")
 
   arbBin := flag.String("arbiter-bin", getEnv("FORGE_ARBITER_BIN", "agy"), "Binário da Forge 5 (ARBITER)")
   arbModel := flag.String("arbiter-model", getEnv("FORGE_ARBITER_MODEL", "Claude Sonnet 4.6 (Thinking)"), "Modelo da Forge 5 (ARBITER)")
+  arbArgs := flag.String("arbiter-args", getEnv("FORGE_ARBITER_ARGS", ""), "Argumentos extras do CLI da Forge 5 (ARBITER)")
 
   flag.Parse()
 
@@ -95,12 +102,12 @@ func main() {
     fatal("Erro ao criar diretório .forge: %v", err)
   }
 
-  onboarder := AgentBinding{Forge: "FORGE 0", Alias: "ONBOARDER", Bin: *onbBin, Model: *onbModel}
-  architect := AgentBinding{Forge: "FORGE 1", Alias: "ARCHITECT", Bin: *archBin, Model: *archModel, Skill: *archSkill}
-  skeptic := AgentBinding{Forge: "FORGE 2", Alias: "SKEPTIC", Bin: *skepBin, Model: *skepModel, Skill: *skepSkill}
-  builder := AgentBinding{Forge: "FORGE 3", Alias: "BUILDER", Bin: *buildBin, Model: *buildModel}
-  sentinel := AgentBinding{Forge: "FORGE 4B", Alias: "SENTINEL", Bin: *sentBin, Model: *sentModel, Skill: *sentSkill}
-  arbiter := AgentBinding{Forge: "FORGE 5", Alias: "ARBITER", Bin: *arbBin, Model: *arbModel}
+  onboarder := AgentBinding{Forge: "FORGE 0", Alias: "ONBOARDER", Bin: *onbBin, Model: *onbModel, Args: *onbArgs}
+  architect := AgentBinding{Forge: "FORGE 1", Alias: "ARCHITECT", Bin: *archBin, Model: *archModel, Skill: *archSkill, Args: *archArgs}
+  skeptic := AgentBinding{Forge: "FORGE 2", Alias: "SKEPTIC", Bin: *skepBin, Model: *skepModel, Skill: *skepSkill, Args: *skepArgs}
+  builder := AgentBinding{Forge: "FORGE 3", Alias: "BUILDER", Bin: *buildBin, Model: *buildModel, Args: *buildArgs}
+  sentinel := AgentBinding{Forge: "FORGE 4B", Alias: "SENTINEL", Bin: *sentBin, Model: *sentModel, Skill: *sentSkill, Args: *sentArgs}
+  arbiter := AgentBinding{Forge: "FORGE 5", Alias: "ARBITER", Bin: *arbBin, Model: *arbModel, Args: *arbArgs}
 
   reader := bufio.NewReader(os.Stdin)
 
@@ -353,6 +360,12 @@ func runProjectSetup(reader *bufio.Reader, onboarder AgentBinding, defaultDocs s
   }
 
   fmt.Printf("\n[TOKENS %s - %s] %s\n", onboarder.Forge, onboarder.Alias, stats.Format())
+
+  contextPath := filepath.Join(targetDocsDir, "PROJECT_CONTEXT.md")
+  if info, statErr := os.Stat(contextPath); statErr != nil || info.IsDir() {
+    fatal("Forge 0 terminou sem gerar %s. O ONBOARDER pode ter sido bloqueado por permissões (veja FORGE_ONBOARDER_ARGS em .forge/models.env) ou falhou ao gravar o arquivo.", contextPath)
+  }
+
   printBanner("FORGE 0 CONCLUÍDA",
     fmt.Sprintf("Contexto salvo em /%s/PROJECT_CONTEXT.md.\nDispare novas demandas com: go run forgeloop.go -task \"...\"", targetDocsDir))
 }
@@ -405,6 +418,7 @@ func updateDemandStatus(demandPath, status string, attempts int, tokens TokenSta
   if demandPath == "" {
     return
   }
+  updateIndexStatus(demandPath, status)
   b, err := os.ReadFile(demandPath)
   if err != nil {
     return
@@ -418,6 +432,28 @@ func updateDemandStatus(demandPath, status string, attempts int, tokens TokenSta
       fmt.Sprintf("- **Detalhamento por Forge:** `%s`", strings.Join(breakdown, " | ")), 1)
   }
   _ = os.WriteFile(demandPath, []byte(content), 0644)
+}
+
+// updateIndexStatus localiza no DEMANDS_INDEX.md (pasta pai de demands/) as linhas da demanda
+// ainda marcadas como IN_PROGRESS e troca pelo novo status.
+func updateIndexStatus(demandPath, status string) {
+  fileName := filepath.Base(demandPath)
+  indexPath := filepath.Join(filepath.Dir(filepath.Dir(demandPath)), "DEMANDS_INDEX.md")
+  b, err := os.ReadFile(indexPath)
+  if err != nil {
+    return
+  }
+  lines := strings.Split(string(b), "\n")
+  changed := false
+  for i, line := range lines {
+    if strings.Contains(line, "(demands/"+fileName+")") && strings.Contains(line, "`IN_PROGRESS`") {
+      lines[i] = strings.Replace(line, "`IN_PROGRESS`", fmt.Sprintf("`%s`", status), 1)
+      changed = true
+    }
+  }
+  if changed {
+    _ = os.WriteFile(indexPath, []byte(strings.Join(lines, "\n")), 0644)
+  }
 }
 
 func selectStack(reader *bufio.Reader) StackConfig {
@@ -520,22 +556,41 @@ func runAgent(agent AgentBinding, prompt string, tryJSON bool) (TokenStats, erro
   if strings.TrimSpace(agent.Model) != "" {
     baseArgs = append(baseArgs, "--model", agent.Model)
   }
+  baseArgs = append(baseArgs, strings.Fields(agent.Args)...)
   baseArgs = append(baseArgs, "-p", prompt)
 
   if tryJSON {
     jsonArgs := append(append([]string{}, baseArgs...), "--output-format", "json")
     rawOut, err := execCapture(agent.Bin, jsonArgs, false)
     if err == nil {
-      if text, stats, ok := parseJSONUsage(rawOut); ok {
-        fmt.Println(text)
-        return stats, nil
+      // Comando executou com sucesso: NUNCA reexecutar (evita trabalho duplicado e efeitos colaterais).
+      text, stats, hasUsage, ok := parseJSONUsage(rawOut)
+      if !ok || text == "" {
+        text = rawOut
       }
+      fmt.Println(text)
+      if !ok || !hasUsage {
+        stats = extractOrEstimateTokens(prompt, text)
+      }
+      return stats, nil
     }
+    if !isUnsupportedFlagError(rawOut) {
+      // Falha real do agente (não é incompatibilidade de flag): não reexecutar.
+      fmt.Print(rawOut)
+      return extractOrEstimateTokens(prompt, rawOut), err
+    }
+    // Flag --output-format não suportada pelo binário: fallback único para modo texto.
   }
 
   rawOut, err := execCapture(agent.Bin, baseArgs, true)
   stats := extractOrEstimateTokens(prompt, rawOut)
   return stats, err
+}
+
+var unsupportedFlagRe = regexp.MustCompile(`(?i)(unknown|unrecognized|invalid|unexpected)\s+(option|flag|argument)|flag provided but not defined|no such option`)
+
+func isUnsupportedFlagError(output string) bool {
+  return unsupportedFlagRe.MatchString(output)
 }
 
 func execCapture(bin string, args []string, streamToConsole bool) (string, error) {
@@ -553,40 +608,36 @@ func execCapture(bin string, args []string, streamToConsole bool) (string, error
   return buf.String(), err
 }
 
-func parseJSONUsage(raw string) (string, TokenStats, bool) {
+func parseJSONUsage(raw string) (text string, stats TokenStats, hasUsage bool, ok bool) {
   start := strings.Index(raw, "{")
   end := strings.LastIndex(raw, "}")
   if start == -1 || end <= start {
-    return "", TokenStats{}, false
+    return "", TokenStats{}, false, false
   }
 
   var payload map[string]any
   if err := json.Unmarshal([]byte(raw[start:end+1]), &payload); err != nil {
-    return "", TokenStats{}, false
+    return "", TokenStats{}, false, false
   }
 
-  text := ""
   for _, key := range []string{"result", "response", "content", "text", "message"} {
-    if v, ok := payload[key].(string); ok && v != "" {
+    if v, isStr := payload[key].(string); isStr && v != "" {
       text = v
       break
     }
   }
 
-  var stats TokenStats
-  if usage, ok := payload["usage"].(map[string]any); ok {
+  if usage, isMap := payload["usage"].(map[string]any); isMap {
     stats.Input = intFromMap(usage, "input_tokens", "prompt_tokens", "promptTokenCount")
     stats.Output = intFromMap(usage, "output_tokens", "completion_tokens", "candidatesTokenCount")
     stats.Total = intFromMap(usage, "total_tokens", "totalTokenCount")
     if stats.Total == 0 {
       stats.Total = stats.Input + stats.Output
     }
-    if stats.Total > 0 {
-      return text, stats, true
-    }
+    hasUsage = stats.Total > 0
   }
 
-  return "", TokenStats{}, false
+  return text, stats, hasUsage, true
 }
 
 func intFromMap(m map[string]any, keys ...string) int {
@@ -706,8 +757,8 @@ func slugify(s string) string {
     }
   }
   res := strings.Trim(b.String(), "-")
-  if len(res) > 45 {
-    res = res[:45]
+  if runes := []rune(res); len(runes) > 45 {
+    res = strings.Trim(string(runes[:45]), "-")
   }
   if res == "" {
     return "demanda"

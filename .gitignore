@@ -7,3 +7,15 @@
 .forge/DECISION.md
 .forge/project.env
 
+#pastas de configuração
+.agents/
+.claude/
+.claude-flow/
+.hermes/
+.openidea/
+.qwen
+
+# Binário compilado
+/forgeloop
+
+/docs/FORGE1-RETORNO-TESTE1.md

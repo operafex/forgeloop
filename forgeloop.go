@@ -839,6 +839,15 @@ func runShellCommand(command string) (string, error) {
   return buf.String(), err
 }
 
+// sanitizeTableCell torna um valor seguro para uma célula de tabela Markdown:
+// "|" vira ";" e quebras de linha viram espaço simples.
+func sanitizeTableCell(s string) string {
+  s = strings.ReplaceAll(s, "|", ";")
+  s = strings.ReplaceAll(s, "\r", " ")
+  s = strings.ReplaceAll(s, "\n", " ")
+  return s
+}
+
 func appendTelemetry(stackName, demandFile, modelsSummary string, attempts int, tokens TokenStats, status, note string) {
   path := ".forge/TELEMETRY.md"
   if _, err := os.Stat(path); os.IsNotExist(err) {
@@ -849,6 +858,10 @@ func appendTelemetry(stackName, demandFile, modelsSummary string, attempts int, 
   if demandFile == "" {
     demandFile = "(via PLAN.md)"
   }
+  stackName = sanitizeTableCell(stackName)
+  demandFile = sanitizeTableCell(demandFile)
+  modelsSummary = sanitizeTableCell(modelsSummary)
+  note = sanitizeTableCell(note)
   row := fmt.Sprintf("| %s | %s | `%s` | %s | %d | %s | **%s** | %s |\n",
     time.Now().Format("2006-01-02 15:04"), stackName, demandFile, modelsSummary, attempts, tokens.Format(), status, note)
 

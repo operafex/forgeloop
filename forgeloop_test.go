@@ -948,3 +948,52 @@ func TestParseJSONUsageSumsCacheTokens(t *testing.T) {
     t.Errorf("cache nulo não deve alterar Input: %+v", s)
   }
 }
+
+func TestAppendTelemetryEscapesPipes(t *testing.T) {
+  orig, err := os.Getwd()
+  if err != nil {
+    t.Fatal(err)
+  }
+  dir := t.TempDir()
+  if err := os.Mkdir(filepath.Join(dir, ".forge"), 0755); err != nil {
+    t.Fatal(err)
+  }
+  if err := os.Chdir(dir); err != nil {
+    t.Fatal(err)
+  }
+  t.Cleanup(func() { _ = os.Chdir(orig) })
+
+  appendTelemetry("go|stack", "demands/a|b.md", "claude|gemini\nx", 2, TokenStats{Input: 1, Output: 2, Total: 3}, "APPROVED", "nota com | pipe\r\ne quebra")
+
+  b, err := os.ReadFile(filepath.Join(".forge", "TELEMETRY.md"))
+  if err != nil {
+    t.Fatal(err)
+  }
+  lines := strings.Split(strings.TrimRight(string(b), "\n"), "\n")
+  var header, row string
+  for _, l := range lines {
+    if strings.HasPrefix(l, "| Data ") {
+      header = l
+    }
+    if strings.Contains(l, "APPROVED") {
+      row = l
+    }
+  }
+  if row == "" || header == "" {
+    t.Fatalf("cabeçalho/linha ausentes:\n%s", b)
+  }
+  if got, want := strings.Count(row, "|"), strings.Count(header, "|"); got != want || want != 9 {
+    t.Errorf("pipes row=%d header=%d; want 9 (8 colunas)\nrow: %s", got, want, row)
+  }
+  for _, want := range []string{"go;stack", "a;b.md", "claude;gemini x", "nota com ; pipe  e quebra"} {
+    if !strings.Contains(row, want) {
+      t.Errorf("linha sem %q: %s", want, row)
+    }
+  }
+}
+
+func TestSanitizeTableCell(t *testing.T) {
+  if got := sanitizeTableCell("a|b\r\nc\nd"); got != "a;b  c d" {
+    t.Errorf("got %q", got)
+  }
+}

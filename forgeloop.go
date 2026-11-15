@@ -783,6 +783,8 @@ func parseJSONUsage(raw string) (text string, stats TokenStats, hasUsage bool, o
   if isMap {
     stats.Input = intFromMap(usage, "input_tokens", "prompt_tokens", "promptTokenCount")
     stats.Output = intFromMap(usage, "output_tokens", "completion_tokens", "candidatesTokenCount")
+    // Claude CLI reporta o prompt em cache à parte; somá-lo reflete o consumo total de entrada.
+    stats.Input += intFromMap(usage, "cache_creation_input_tokens") + intFromMap(usage, "cache_read_input_tokens")
     stats.Total = intFromMap(usage, "total_tokens", "totalTokenCount")
     if stats.Total == 0 {
       stats.Total = stats.Input + stats.Output
@@ -1027,10 +1029,14 @@ func startRunLog(docsDir, suffix string) {
   fmt.Printf("[LOG] Registro completo salvo em: %s\n", l.Path)
 }
 
+// ansiRe casa sequências de escape ANSI (cores, cursor, limpeza de linha) emitidas por subprocessos como o npx.
+var ansiRe = regexp.MustCompile(`\x1b\[[0-9;?]*[a-zA-Z]`)
+
 func (l *RunLog) write(s string) {
   if l == nil {
     return
   }
+  s = ansiRe.ReplaceAllString(s, "")
   l.mu.Lock()
   defer l.mu.Unlock()
   _, _ = l.f.WriteString(s)
@@ -1232,30 +1238,54 @@ func skillSearchRoots(baseDir, home string) []string {
   return roots
 }
 
-// skillInstalled considera a skill presente se existir uma pasta com o seu nome em alguma raiz
-// ou se o skills-lock.json (lockPath) registrar o identificador como origem.
-func skillInstalled(skill string, roots []string, lockPath string) bool {
+// skillAliases mapeia o nome curto de uma skill configurada para o nome com que o
+// `npx skills add` a registra/instala (a pasta ou a chave do lock diferem do nome do repositório).
+var skillAliases = map[string]string{
+  "security-audit-skill":    "security-audit",
+  "superpowers":             "writing-plans",
+  "elephant-goldfish-model": "egm-review",
+}
+
+// skillInstalled considera a skill presente se existir uma pasta com o seu nome (ou alias) em alguma
+// raiz, ou se algum lock registrar o identificador como origem ou o nome (ou alias) como chave.
+// lockPaths aceita vários arquivos separados por os.PathListSeparator
+// (ex.: skills-lock.json local e ~/.agents/.skill-lock.json global).
+func skillInstalled(skill string, roots []string, lockPaths string) bool {
   name := skillShortName(skill)
   if name == "" {
     return false
   }
+  names := []string{name}
+  if alias, ok := skillAliases[strings.ToLower(name)]; ok {
+    names = append(names, alias)
+  }
   for _, r := range roots {
-    if fi, err := os.Stat(filepath.Join(r, name)); err == nil && fi.IsDir() {
-      return true
+    for _, n := range names {
+      if fi, err := os.Stat(filepath.Join(r, n)); err == nil && fi.IsDir() {
+        return true
+      }
     }
   }
-  if lockPath != "" {
-    if b, err := os.ReadFile(lockPath); err == nil {
-      var lock struct {
-        Skills map[string]struct {
-          Source string `json:"source"`
-        } `json:"skills"`
+  for _, lockPath := range filepath.SplitList(lockPaths) {
+    b, err := os.ReadFile(lockPath)
+    if err != nil {
+      continue
+    }
+    var lock struct {
+      Skills map[string]struct {
+        Source string `json:"source"`
+      } `json:"skills"`
+    }
+    if json.Unmarshal(b, &lock) != nil {
+      continue
+    }
+    for k, v := range lock.Skills {
+      if strings.EqualFold(v.Source, skill) {
+        return true
       }
-      if json.Unmarshal(b, &lock) == nil {
-        for k, v := range lock.Skills {
-          if strings.EqualFold(v.Source, skill) || strings.EqualFold(k, name) {
-            return true
-          }
+      for _, n := range names {
+        if strings.EqualFold(k, n) {
+          return true
         }
       }
     }
@@ -1327,7 +1357,11 @@ func stageSkills(startStage int, architect, skeptic, sentinel AgentBinding) []st
 func currentSkillRoots() ([]string, string) {
   cwd, _ := os.Getwd()
   home, _ := os.UserHomeDir()
-  return skillSearchRoots(cwd, home), "skills-lock.json"
+  locks := "skills-lock.json"
+  if home != "" {
+    locks += string(os.PathListSeparator) + filepath.Join(home, ".agents", ".skill-lock.json")
+  }
+  return skillSearchRoots(cwd, home), locks
 }
 
 // preflightSkills avisa (sem bloquear) se alguma skill configurada não está instalada.

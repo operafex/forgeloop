@@ -890,3 +890,61 @@ func TestAgentLabelUsesEtapa(t *testing.T) {
     t.Errorf("label = %q", got)
   }
 }
+
+func TestSkillInstalledGlobalLockAndAliases(t *testing.T) {
+  dir := t.TempDir()
+  global := filepath.Join(dir, ".skill-lock.json")
+  local := filepath.Join(dir, "skills-lock.json")
+  _ = os.WriteFile(global, []byte(`{"version":3,"skills":{"writing-plans":{"source":"obra/superpowers"},"egm-review":{"source":"google/elephant-goldfish-model"}}}`), 0644)
+  lockPaths := local + string(os.PathListSeparator) + global // local ausente, global presente
+
+  for _, sk := range []string{"obra/superpowers", "google/elephant-goldfish-model"} {
+    if !skillInstalled(sk, nil, lockPaths) {
+      t.Errorf("%s deveria casar pelo lock global", sk)
+    }
+  }
+  if skillInstalled("cloudflare/security-audit-skill", nil, lockPaths) {
+    t.Error("skill fora do lock não deveria casar")
+  }
+
+  // alias por chave do lock (sem source casando)
+  _ = os.WriteFile(global, []byte(`{"skills":{"security-audit":{"source":"outro/fork"}}}`), 0644)
+  if !skillInstalled("cloudflare/security-audit-skill", nil, global) {
+    t.Error("alias security-audit-skill -> security-audit deveria casar pela chave do lock")
+  }
+
+  // alias por pasta
+  roots := []string{filepath.Join(dir, "skills")}
+  _ = os.MkdirAll(filepath.Join(roots[0], "writing-plans"), 0755)
+  if !skillInstalled("obra/superpowers", roots, "") {
+    t.Error("alias superpowers -> writing-plans deveria casar pela pasta")
+  }
+  if skillInstalled("google/elephant-goldfish-model", roots, "") {
+    t.Error("egm-review não está instalada")
+  }
+}
+
+func TestRunLogStripsANSI(t *testing.T) {
+  l, err := initRunLog(t.TempDir(), "ansi")
+  if err != nil {
+    t.Fatal(err)
+  }
+  l.write("\x1b[32mverde\x1b[0m \x1b[?25l\x1b[2K sem cor\n")
+  l.Close()
+  b, _ := os.ReadFile(l.Path)
+  if got, want := string(b), "verde  sem cor\n"; got != want {
+    t.Errorf("log = %q; want %q", got, want)
+  }
+}
+
+func TestParseJSONUsageSumsCacheTokens(t *testing.T) {
+  _, s, has, ok := parseJSONUsage(`{"result":"r","usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":100,"cache_read_input_tokens":1000}}`)
+  want := TokenStats{Input: 1110, Output: 5, Total: 1115}
+  if !ok || !has || s != want {
+    t.Errorf("got %+v has=%v ok=%v; want %+v", s, has, ok, want)
+  }
+  _, s, _, _ = parseJSONUsage(`{"result":"r","usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":null}}`)
+  if s.Input != 10 {
+    t.Errorf("cache nulo não deve alterar Input: %+v", s)
+  }
+}

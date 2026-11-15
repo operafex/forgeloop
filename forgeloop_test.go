@@ -8,79 +8,428 @@ import (
   "strings"
   "testing"
   "time"
+  "unicode/utf8"
 )
 
+// ---------------------------------------------------------------------------
+// slugify — Task 1 (ver .forge/PLAN.md / .forge/TEST_CASES.md: S-*)
+// ---------------------------------------------------------------------------
+
 func TestSlugify(t *testing.T) {
-  cases := map[string]string{
-    "Criar API de Usuários": "criar-api-de-usuários",
-    "  --Olá,   Mundo!!  ":  "olá-mundo",
-    "":                      "demanda",
-    "!!!":                   "demanda",
+  cases := []struct {
+    id, in, want string
+  }{
+    {"S-H1", "Criar API de Usuários", "criar-api-de-usuários"},
+    {"S-H2", "Etapa 2 do Loop", "etapa-2-do-loop"},
+    {"S-H3", "já-existe", "já-existe"},
+    {"S-E1", "  --Olá,   Mundo!!  ", "olá-mundo"},
+    {"S-E2", "a___b...c", "a-b-c"},
+    {"S-E3", "UPPER lower", "upper-lower"},
+    {"S-E4", "tab\tnew\nline", "tab-new-line"},
+    {"S-E5", "emoji 🚀 rocket", "emoji-rocket"},
+    {"S-E6", "١٢٣ árabe", "١٢٣-árabe"},
+    {"S-X1", "", "demanda"},
+    {"S-X2", "!!!", "demanda"},
+    {"S-X3", "   ", "demanda"},
+    {"S-X4", "🚀🔥", "demanda"},
   }
-  for in, want := range cases {
-    if got := slugify(in); got != want {
-      t.Errorf("slugify(%q) = %q; want %q", in, got, want)
+  for _, c := range cases {
+    t.Run(c.id, func(t *testing.T) {
+      if got := slugify(c.in); got != c.want {
+        t.Errorf("slugify(%q) = %q; want %q", c.in, got, c.want)
+      }
+    })
+  }
+}
+
+func TestSlugifyTruncatesAt45Runes(t *testing.T) {
+  // S-E7: corte por runes (não por bytes) — nunca gera UTF-8 inválido.
+  got := slugify(strings.Repeat("ã", 100))
+  if n := len([]rune(got)); n != 45 {
+    t.Errorf("esperava 45 runes, obtive %d (%q)", n, got)
+  }
+  if !utf8.ValidString(got) {
+    t.Errorf("slug com UTF-8 inválido: %q", got)
+  }
+}
+
+func TestSlugifyTruncationDoesNotEndWithDash(t *testing.T) {
+  // S-E8: rune 45 cai num separador → hífen final removido.
+  in := strings.Repeat("a", 44) + " bbbb"
+  got := slugify(in)
+  if got != strings.Repeat("a", 44) {
+    t.Errorf("slugify(%q) = %q; want 44 'a' sem hífen final", in, got)
+  }
+}
+
+func TestSlugifyExactly45RunesUnchanged(t *testing.T) {
+  // S-E9: fronteira — 45 runes exatos não são cortados.
+  in := strings.Repeat("b", 45)
+  if got := slugify(in); got != in {
+    t.Errorf("slugify(45 runes) = %q; want inalterado", got)
+  }
+}
+
+func TestSlugifyIsIdempotent(t *testing.T) {
+  // S-E10
+  for _, in := range []string{"Criar API de Usuários", "  --Olá,   Mundo!!  ", strings.Repeat("xy ", 40)} {
+    once := slugify(in)
+    if twice := slugify(once); twice != once {
+      t.Errorf("não idempotente: slugify(%q)=%q, slugify(slugify)=%q", in, once, twice)
     }
   }
-  if got := []rune(slugify(strings.Repeat("ã", 100))); len(got) > 45 {
-    t.Errorf("slugify não cortou em 45 runes: %d", len(got))
+}
+
+func TestSlugifyKeepsCombiningMarks(t *testing.T) {
+  // S-R1 (RED): texto em NFD (comum em nomes de arquivo no macOS) não pode
+  // quebrar a palavra no diacrítico combinante. "decisão" em NFD = "decisa"+U+0303+"o".
+  cases := []struct{ in, want string }{
+    {"decisão final", "decisão-final"},
+    {"café com leite", "café-com-leite"},
+  }
+  for _, c := range cases {
+    if got := slugify(c.in); got != c.want {
+      t.Errorf("slugify(%q) = %q; want %q (marca combinante deve ser preservada)", c.in, got, c.want)
+    }
   }
 }
+
+// ---------------------------------------------------------------------------
+// parseJSONUsage — Task 2 (P-*)
+// ---------------------------------------------------------------------------
 
 func TestParseJSONUsage(t *testing.T) {
-  _, s, has, ok := parseJSONUsage(`{"result":"oi","usage":{"input_tokens":10,"output_tokens":5}}`)
-  if !ok || !has || s.Total != 15 {
-    t.Errorf("usage: %+v has=%v ok=%v", s, has, ok)
+  cases := []struct {
+    id       string
+    raw      string
+    text     string
+    stats    TokenStats
+    hasUsage bool
+    ok       bool
+  }{
+    {"P-H1", `{"result":"oi","usage":{"input_tokens":10,"output_tokens":5}}`,
+      "oi", TokenStats{Input: 10, Output: 5, Total: 15}, true, true},
+    {"P-H2", `{"response":"oi","usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15}}`,
+      "oi", TokenStats{Input: 10, Output: 5, Total: 15}, true, true},
+    {"P-H3", `{"content":"c","usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":11}}`,
+      "c", TokenStats{Input: 7, Output: 3, Total: 11}, true, true},
+    {"P-H4", "banner da CLI\n{\"result\":\"ok\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}\n",
+      "ok", TokenStats{Input: 1, Output: 1, Total: 2}, true, true},
+    {"P-E1", `{"usage":{"input_tokens":1,"output_tokens":2},"usageMetadata":{"totalTokenCount":99}}`,
+      "", TokenStats{Input: 1, Output: 2, Total: 3}, true, true},
+    {"P-E2", `{"result":"","response":"segundo"}`,
+      "segundo", TokenStats{}, false, true},
+    {"P-E3", `{"result":42,"text":"t"}`,
+      "t", TokenStats{}, false, true},
+    {"P-E4", `{"result":"r","response":"s","content":"c","text":"t","message":"m"}`,
+      "r", TokenStats{}, false, true},
+    {"P-E5", `{"message":"m","usage":"não-é-mapa"}`,
+      "m", TokenStats{}, false, true},
+    {"P-E6", `{"result":"r","usage":{"input_tokens":0,"output_tokens":0}}`,
+      "r", TokenStats{}, false, true},
+    {"P-E7", `{"result":"r","usage":{"input_tokens":"10","output_tokens":"5"}}`,
+      "r", TokenStats{}, false, true},
+    {"P-E8", `{"usage":{"total_tokens":50}}`,
+      "", TokenStats{Total: 50}, true, true},
+    {"P-E9", `{}`, "", TokenStats{}, false, true},
+    {"P-X1", "texto sem json", "", TokenStats{}, false, false},
+    {"P-X2", "", "", TokenStats{}, false, false},
+    {"P-X3", "} invertido {", "", TokenStats{}, false, false},
+    {"P-X4", `{"result": "truncado"`, "", TokenStats{}, false, false},
+    {"P-X5", `{not json}`, "", TokenStats{}, false, false},
   }
-  _, s, has, ok = parseJSONUsage(`{"response":"oi","usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15}}`)
-  if !ok || !has || s.Input != 10 || s.Output != 5 || s.Total != 15 {
-    t.Errorf("usageMetadata: %+v has=%v ok=%v", s, has, ok)
-  }
-  _, s, _, _ = parseJSONUsage(`{"usage":{"input_tokens":1,"output_tokens":2},"usageMetadata":{"totalTokenCount":99}}`)
-  if s.Total != 3 {
-    t.Errorf("usage deve ter precedência: %+v", s)
-  }
-  if _, _, _, ok = parseJSONUsage("texto sem json"); ok {
-    t.Error("texto sem JSON não deveria ser ok")
+  for _, c := range cases {
+    t.Run(c.id, func(t *testing.T) {
+      text, stats, has, ok := parseJSONUsage(c.raw)
+      if text != c.text || stats != c.stats || has != c.hasUsage || ok != c.ok {
+        t.Errorf("parseJSONUsage(%q)\n got:  text=%q stats=%+v has=%v ok=%v\n want: text=%q stats=%+v has=%v ok=%v",
+          c.raw, text, stats, has, ok, c.text, c.stats, c.hasUsage, c.ok)
+      }
+    })
   }
 }
 
-func TestExtractOrEstimateTokens(t *testing.T) {
-  s := extractOrEstimateTokens("p", `{"cache_creation_input_tokens": 9000, "input_tokens": 12, "output_tokens": 34}`)
-  if s.Input != 12 || s.Output != 34 || s.Total != 46 || s.Estimated {
-    t.Errorf("cache_creation_input_tokens capturado indevidamente: %+v", s)
-  }
-  s = extractOrEstimateTokens("p", "input_tokens: 99999999999999999999999 output_tokens: 1")
-  if !s.Estimated || s.Total < 0 {
-    t.Errorf("overflow deveria cair na estimativa: %+v", s)
-  }
-  s = extractOrEstimateTokens("p", "sem métricas")
-  if !s.Estimated || s.Total <= 0 {
-    t.Errorf("estimativa esperada: %+v", s)
+func TestParseJSONUsageNeverMarksEstimated(t *testing.T) {
+  // P-E10: dados vindos do JSON são reais, nunca estimados.
+  _, s, _, _ := parseJSONUsage(`{"usage":{"input_tokens":3,"output_tokens":4}}`)
+  if s.Estimated {
+    t.Errorf("Estimated deveria ser false: %+v", s)
   }
 }
+
+func TestParseJSONUsageToleratesBraceNoise(t *testing.T) {
+  // P-R1 (RED): execCapture mescla stdout+stderr; avisos com chaves antes ou
+  // depois do payload não podem invalidar o JSON válido.
+  payload := `{"result":"ok","usage":{"input_tokens":10,"output_tokens":5}}`
+  cases := map[string]string{
+    "P-R1a ruído antes":  "[warn] config {legacy} ignorada\n" + payload,
+    "P-R1b ruído depois": payload + "\n[info] done {ok}",
+    "P-R1c ambos":        "{x}\n" + payload + "\n{y}",
+    "P-R1d log JSON sem chaves conhecidas antes": `{"level":"warn","msg":"slow"}` + "\n" + payload,
+  }
+  want := TokenStats{Input: 10, Output: 5, Total: 15}
+  for name, raw := range cases {
+    t.Run(name, func(t *testing.T) {
+      text, s, has, ok := parseJSONUsage(raw)
+      if !ok || !has || text != "ok" || s != want {
+        t.Errorf("parseJSONUsage(%q) = text=%q stats=%+v has=%v ok=%v; want text=\"ok\" stats=%+v has=true ok=true",
+          raw, text, s, has, ok, want)
+      }
+    })
+  }
+}
+
+// ---------------------------------------------------------------------------
+// extractOrEstimateTokens — Task 3 (T-*)
+// ---------------------------------------------------------------------------
+
+func TestExtractOrEstimateTokensParsesReportedUsage(t *testing.T) {
+  cases := []struct {
+    id, out string
+    in, outN int
+  }{
+    {"T-H1", `{"input_tokens": 12, "output_tokens": 34}`, 12, 34},
+    {"T-H2", "prompt_tokens=7 completion_tokens=8", 7, 8},
+    {"T-H3", "Input Tokens: 100\nOutput Tokens: 200", 100, 200},
+    {"T-H4", "candidates-tokens: 5 input-tokens: 6", 6, 5},
+    {"T-H5", "output_tokens: 9 ... input_tokens: 3", 3, 9},
+    {"T-E1", `{"cache_creation_input_tokens": 9000, "input_tokens": 12, "output_tokens": 34}`, 12, 34},
+    {"T-E2", `{"cache_read_input_tokens": 500, "max_output_tokens": 4096, "input_tokens": 1, "output_tokens": 2}`, 1, 2},
+    {"T-E3", "input_tokens: 0 output_tokens: 0", 0, 0},
+    {"T-E4", "INPUT_TOKENS='4' OUTPUT_TOKENS='6'", 4, 6},
+  }
+  for _, c := range cases {
+    t.Run(c.id, func(t *testing.T) {
+      s := extractOrEstimateTokens("prompt qualquer", c.out)
+      want := TokenStats{Input: c.in, Output: c.outN, Total: c.in + c.outN, Estimated: false}
+      if s != want {
+        t.Errorf("extractOrEstimateTokens(_, %q) = %+v; want %+v", c.out, s, want)
+      }
+    })
+  }
+}
+
+func TestExtractOrEstimateTokensFallsBackToEstimate(t *testing.T) {
+  prompt := strings.Repeat("p", 400) // 400/4 + 1200 = 1300
+  output := strings.Repeat("o", 80)  // 80/4 = 20
+  want := TokenStats{Input: 1300, Output: 20, Total: 1320, Estimated: true}
+  cases := map[string]string{
+    "T-X1 sem métricas":        output,
+    "T-X2 só input":            "input_tokens: 5" + strings.Repeat("o", 80-len("input_tokens: 5")),
+    "T-X3 só output":           "output_tokens: 5" + strings.Repeat("o", 80-len("output_tokens: 5")),
+    "T-X4 overflow int":        "input_tokens: 99999999999999999999999 output_tokens: 1" + strings.Repeat("o", 80-len("input_tokens: 99999999999999999999999 output_tokens: 1")),
+    "T-X5 número negativo":     "input_tokens: -5 output_tokens: -9" + strings.Repeat("o", 80-len("input_tokens: -5 output_tokens: -9")),
+    "T-X6 prefixo colado (_)":  "my_input_tokens: 5 my_output_tokens: 6" + strings.Repeat("o", 80-len("my_input_tokens: 5 my_output_tokens: 6")),
+  }
+  for name, out := range cases {
+    t.Run(name, func(t *testing.T) {
+      if len(out) != 80 {
+        t.Fatalf("fixture inválida: len=%d", len(out))
+      }
+      if s := extractOrEstimateTokens(prompt, out); s != want {
+        t.Errorf("extractOrEstimateTokens = %+v; want %+v", s, want)
+      }
+    })
+  }
+}
+
+func TestExtractOrEstimateTokensEmptyInputs(t *testing.T) {
+  // T-E5: prompt e saída vazios → apenas o overhead fixo de 1200.
+  want := TokenStats{Input: 1200, Output: 0, Total: 1200, Estimated: true}
+  if s := extractOrEstimateTokens("", ""); s != want {
+    t.Errorf("got %+v; want %+v", s, want)
+  }
+}
+
+func TestExtractOrEstimateTokensEstimateUsesBytes(t *testing.T) {
+  // T-E6: estimativa é por bytes (len), não por runes — "ã" = 2 bytes.
+  s := extractOrEstimateTokens(strings.Repeat("ã", 8), strings.Repeat("ã", 8))
+  if s.Input != 1204 || s.Output != 4 || s.Total != 1208 || !s.Estimated {
+    t.Errorf("got %+v; want {1204 4 1208 true}", s)
+  }
+}
+
+func TestExtractOrEstimateTokensThousandsSeparator(t *testing.T) {
+  // T-R1 (RED): resumos legíveis de CLIs usam separador de milhar.
+  cases := []struct {
+    out      string
+    in, outN int
+  }{
+    {"Input tokens: 12,345\nOutput tokens: 1,002", 12345, 1002},
+    {"input_tokens: 1,234,567 output_tokens: 89", 1234567, 89},
+    {`{"input_tokens": 12,"output_tokens": 34}`, 12, 34}, // vírgula JSON NÃO é separador
+  }
+  for _, c := range cases {
+    s := extractOrEstimateTokens("p", c.out)
+    want := TokenStats{Input: c.in, Output: c.outN, Total: c.in + c.outN}
+    if s != want {
+      t.Errorf("extractOrEstimateTokens(_, %q) = %+v; want %+v", c.out, s, want)
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// updateIndexStatus — Task 4 (U-*)
+// ---------------------------------------------------------------------------
 
 const indexHeader = "# Índice\n\n| Data | Stack | Demanda | Arquivo | Status |\n| :--- | :--- | :--- | :--- | :--- |\n"
 
-func TestUpdateIndexStatus(t *testing.T) {
-  dir := t.TempDir()
-  if err := ensureDocsDirs(dir); err != nil {
+func indexRow(file, status string) string {
+  return "| 2026-01-01 | Go | d | [`" + file + "`](demands/" + file + ") | `" + status + "` |\n"
+}
+
+// setupIndex cria <tmp>/docs/{demands,logs} e DEMANDS_INDEX.md com o conteúdo dado.
+func setupIndex(t *testing.T, content string) (docsDir, indexPath string) {
+  t.Helper()
+  docsDir = filepath.Join(t.TempDir(), "docs")
+  if err := ensureDocsDirs(docsDir); err != nil {
     t.Fatal(err)
   }
-  demand := filepath.Join(dir, "demands", "2026-01-01-x.md")
-  index := filepath.Join(dir, "DEMANDS_INDEX.md")
-  rows := "| 2026-01-01 | Go | x | [`2026-01-01-x.md`](demands/2026-01-01-x.md) | `IN_PROGRESS` |\n" +
-    "| 2026-01-01 | Go | y | [`2026-01-01-y.md`](demands/2026-01-01-y.md) | `IN_PROGRESS` |\n"
-  _ = os.WriteFile(index, []byte(indexHeader+rows), 0644)
-
-  updateIndexStatus(demand, "APPROVED")
-  b, _ := os.ReadFile(index)
-  got := string(b)
-  if !strings.Contains(got, "(demands/2026-01-01-x.md) | `APPROVED` |") {
-    t.Errorf("linha da demanda x não atualizada:\n%s", got)
+  indexPath = filepath.Join(docsDir, "DEMANDS_INDEX.md")
+  if err := os.WriteFile(indexPath, []byte(content), 0644); err != nil {
+    t.Fatal(err)
   }
-  if !strings.Contains(got, "(demands/2026-01-01-y.md) | `IN_PROGRESS` |") {
-    t.Errorf("linha da demanda y não deveria mudar:\n%s", got)
+  return docsDir, indexPath
+}
+
+func readString(t *testing.T, path string) string {
+  t.Helper()
+  b, err := os.ReadFile(path)
+  if err != nil {
+    t.Fatal(err)
+  }
+  return string(b)
+}
+
+func TestUpdateIndexStatus(t *testing.T) {
+  // U-H1: apenas a linha da demanda alvo muda.
+  docs, index := setupIndex(t, indexHeader+indexRow("2026-01-01-x.md", "IN_PROGRESS")+indexRow("2026-01-01-y.md", "IN_PROGRESS"))
+  updateIndexStatus(filepath.Join(docs, "demands", "2026-01-01-x.md"), "APPROVED")
+  want := indexHeader + indexRow("2026-01-01-x.md", "APPROVED") + indexRow("2026-01-01-y.md", "IN_PROGRESS")
+  if got := readString(t, index); got != want {
+    t.Errorf("índice inesperado:\n got:\n%s\n want:\n%s", got, want)
+  }
+}
+
+func TestUpdateIndexStatusUnicodeFileName(t *testing.T) {
+  // U-H2: nome com acentos (como as demandas reais).
+  file := "2026-11-15-criar-testes-unitários.md"
+  docs, index := setupIndex(t, indexHeader+indexRow(file, "IN_PROGRESS"))
+  updateIndexStatus(filepath.Join(docs, "demands", file), "FAILED")
+  if got := readString(t, index); got != indexHeader+indexRow(file, "FAILED") {
+    t.Errorf("linha unicode não atualizada:\n%s", got)
+  }
+}
+
+func TestUpdateIndexStatusUpdatesAllInProgressRowsOfSameDemand(t *testing.T) {
+  // U-E1: demanda re-executada aparece 2x no índice → ambas atualizadas.
+  f := "2026-01-01-x.md"
+  docs, index := setupIndex(t, indexHeader+indexRow(f, "IN_PROGRESS")+indexRow(f, "IN_PROGRESS"))
+  updateIndexStatus(filepath.Join(docs, "demands", f), "APPROVED")
+  if got := readString(t, index); got != indexHeader+indexRow(f, "APPROVED")+indexRow(f, "APPROVED") {
+    t.Errorf("todas as linhas IN_PROGRESS deveriam mudar:\n%s", got)
+  }
+}
+
+func TestUpdateIndexStatusDoesNotTouchFinalizedRows(t *testing.T) {
+  // U-E2: linhas já finalizadas (sem IN_PROGRESS) permanecem intactas.
+  f := "2026-01-01-x.md"
+  content := indexHeader + indexRow(f, "FAILED") + indexRow(f, "IN_PROGRESS")
+  docs, index := setupIndex(t, content)
+  updateIndexStatus(filepath.Join(docs, "demands", f), "APPROVED")
+  if got := readString(t, index); got != indexHeader+indexRow(f, "FAILED")+indexRow(f, "APPROVED") {
+    t.Errorf("linha finalizada foi alterada:\n%s", got)
+  }
+}
+
+func TestUpdateIndexStatusNoSuffixCollision(t *testing.T) {
+  // U-E3: "x.md" não pode casar com "2026-01-01-x.md".
+  content := indexHeader + indexRow("2026-01-01-x.md", "IN_PROGRESS")
+  docs, index := setupIndex(t, content)
+  updateIndexStatus(filepath.Join(docs, "demands", "x.md"), "APPROVED")
+  if got := readString(t, index); got != content {
+    t.Errorf("demanda com sufixo igual foi alterada indevidamente:\n%s", got)
+  }
+}
+
+func TestUpdateIndexStatusPreservesLayout(t *testing.T) {
+  // U-E4: CRLF e ausência de newline final preservados byte a byte.
+  f := "2026-01-01-x.md"
+  content := "# Índice\r\n| a | [`" + f + "`](demands/" + f + ") | `IN_PROGRESS` |"
+  docs, index := setupIndex(t, content)
+  updateIndexStatus(filepath.Join(docs, "demands", f), "APPROVED")
+  want := "# Índice\r\n| a | [`" + f + "`](demands/" + f + ") | `APPROVED` |"
+  if got := readString(t, index); got != want {
+    t.Errorf("layout alterado:\n got %q\nwant %q", got, want)
+  }
+}
+
+func TestUpdateIndexStatusReplacesOnlyFirstStatusToken(t *testing.T) {
+  // U-E5: se a descrição contiver `IN_PROGRESS`, só a 1ª ocorrência da linha muda (comportamento atual).
+  f := "2026-01-01-x.md"
+  row := "| d | [`" + f + "`](demands/" + f + ") | `IN_PROGRESS` | nota `IN_PROGRESS` |\n"
+  docs, index := setupIndex(t, indexHeader+row)
+  updateIndexStatus(filepath.Join(docs, "demands", f), "APPROVED")
+  want := indexHeader + "| d | [`" + f + "`](demands/" + f + ") | `APPROVED` | nota `IN_PROGRESS` |\n"
+  if got := readString(t, index); got != want {
+    t.Errorf("got:\n%s\nwant:\n%s", got, want)
+  }
+}
+
+func TestUpdateIndexStatusMissingIndexIsNoop(t *testing.T) {
+  // U-X1: sem DEMANDS_INDEX.md → não cria arquivo nem entra em pânico.
+  docs := filepath.Join(t.TempDir(), "docs")
+  if err := ensureDocsDirs(docs); err != nil {
+    t.Fatal(err)
+  }
+  updateIndexStatus(filepath.Join(docs, "demands", "x.md"), "APPROVED")
+  if _, err := os.Stat(filepath.Join(docs, "DEMANDS_INDEX.md")); !os.IsNotExist(err) {
+    t.Errorf("índice não deveria ser criado: %v", err)
+  }
+}
+
+func TestUpdateIndexStatusNoMatchDoesNotRewrite(t *testing.T) {
+  // U-X2: sem linha correspondente → arquivo não é regravado (mtime intacto).
+  content := indexHeader + indexRow("2026-01-01-y.md", "IN_PROGRESS")
+  docs, index := setupIndex(t, content)
+  old := time.Now().Add(-time.Hour).Truncate(time.Second)
+  if err := os.Chtimes(index, old, old); err != nil {
+    t.Fatal(err)
+  }
+  updateIndexStatus(filepath.Join(docs, "demands", "2026-01-01-x.md"), "APPROVED")
+  fi, err := os.Stat(index)
+  if err != nil {
+    t.Fatal(err)
+  }
+  if !fi.ModTime().Equal(old) {
+    t.Errorf("índice regravado sem necessidade (mtime %v != %v)", fi.ModTime(), old)
+  }
+  if got := readString(t, index); got != content {
+    t.Errorf("conteúdo alterado:\n%s", got)
+  }
+}
+
+func TestUpdateIndexStatusEmptyDemandPathIsNoop(t *testing.T) {
+  // U-X3: demandPath vazio não pode alterar nada (nem um índice no cwd).
+  content := indexHeader + indexRow("2026-01-01-x.md", "IN_PROGRESS")
+  _, index := setupIndex(t, content)
+  updateIndexStatus("", "APPROVED")
+  if got := readString(t, index); got != content {
+    t.Errorf("conteúdo alterado:\n%s", got)
+  }
+}
+
+func TestUpdateIndexStatusRejectsBlankStatus(t *testing.T) {
+  // U-R1 (RED): status vazio/só espaços corromperia a tabela com "``";
+  // deve ser no-op e manter `IN_PROGRESS`.
+  f := "2026-01-01-x.md"
+  content := indexHeader + indexRow(f, "IN_PROGRESS")
+  for _, status := range []string{"", "   "} {
+    docs, index := setupIndex(t, content)
+    updateIndexStatus(filepath.Join(docs, "demands", f), status)
+    if got := readString(t, index); got != content {
+      t.Errorf("status %q alterou o índice:\n%s", status, got)
+    }
   }
 }
 

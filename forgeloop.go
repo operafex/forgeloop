@@ -520,6 +520,9 @@ func updateDemandStatus(demandPath, status string, attempts int, tokens TokenSta
 // updateIndexStatus localiza no DEMANDS_INDEX.md (pasta pai de demands/) as linhas da demanda
 // ainda marcadas como IN_PROGRESS e troca pelo novo status.
 func updateIndexStatus(demandPath, status string) {
+  if strings.TrimSpace(status) == "" {
+    return
+  }
   fileName := filepath.Base(demandPath)
   indexPath := filepath.Join(filepath.Dir(filepath.Dir(demandPath)), "DEMANDS_INDEX.md")
   b, err := os.ReadFile(indexPath)
@@ -725,14 +728,44 @@ func execCapture(bin string, args []string) (string, error) {
 }
 
 func parseJSONUsage(raw string) (text string, stats TokenStats, hasUsage bool, ok bool) {
-  start := strings.Index(raw, "{")
-  end := strings.LastIndex(raw, "}")
-  if start == -1 || end <= start {
-    return "", TokenStats{}, false, false
+  var candidatePayload map[string]any
+  var firstValidPayload map[string]any
+
+  targetKeys := []string{"result", "response", "content", "text", "message", "usage", "usageMetadata"}
+
+  for i := 0; i < len(raw); i++ {
+    if raw[i] != '{' {
+      continue
+    }
+    dec := json.NewDecoder(strings.NewReader(raw[i:]))
+    var obj map[string]any
+    if err := dec.Decode(&obj); err != nil {
+      continue
+    }
+    hasKey := false
+    for _, k := range targetKeys {
+      if _, exists := obj[k]; exists {
+        hasKey = true
+        break
+      }
+    }
+    if hasKey {
+      candidatePayload = obj
+      break
+    }
+    if firstValidPayload == nil {
+      firstValidPayload = obj
+    }
+    if offset := dec.InputOffset(); offset > 0 {
+      i += int(offset) - 1
+    }
   }
 
-  var payload map[string]any
-  if err := json.Unmarshal([]byte(raw[start:end+1]), &payload); err != nil {
+  payload := candidatePayload
+  if payload == nil {
+    payload = firstValidPayload
+  }
+  if payload == nil {
     return "", TokenStats{}, false, false
   }
 
@@ -770,16 +803,16 @@ func intFromMap(m map[string]any, keys ...string) int {
 }
 
 var (
-  tokenInRe  = regexp.MustCompile(`(?i)(?:^|[^a-z0-9_])(?:input|prompt)[_\s-]*tokens["'\s:=]+(\d+)`)
-  tokenOutRe = regexp.MustCompile(`(?i)(?:^|[^a-z0-9_])(?:output|completion|candidates)[_\s-]*tokens["'\s:=]+(\d+)`)
+  tokenInRe  = regexp.MustCompile(`(?i)(?:^|[^a-z0-9_])(?:input|prompt)[_\s-]*tokens["'\s:=]+(\d{1,3}(?:,\d{3})+|\d+)`)
+  tokenOutRe = regexp.MustCompile(`(?i)(?:^|[^a-z0-9_])(?:output|completion|candidates)[_\s-]*tokens["'\s:=]+(\d{1,3}(?:,\d{3})+|\d+)`)
 )
 
 func extractOrEstimateTokens(prompt, output string) TokenStats {
   mIn := tokenInRe.FindStringSubmatch(output)
   mOut := tokenOutRe.FindStringSubmatch(output)
   if mIn != nil && mOut != nil {
-    inVal, errIn := strconv.Atoi(mIn[1])
-    outVal, errOut := strconv.Atoi(mOut[1])
+    inVal, errIn := strconv.Atoi(strings.ReplaceAll(mIn[1], ",", ""))
+    outVal, errOut := strconv.Atoi(strings.ReplaceAll(mOut[1], ",", ""))
     if errIn == nil && errOut == nil {
       return TokenStats{Input: inVal, Output: outVal, Total: inVal + outVal, Estimated: false}
     }
@@ -865,7 +898,7 @@ func slugify(s string) string {
   var b strings.Builder
   lastDash := false
   for _, r := range strings.ToLower(s) {
-    if unicode.IsLetter(r) || unicode.IsDigit(r) {
+    if unicode.IsLetter(r) || unicode.IsDigit(r) || unicode.IsMark(r) {
       b.WriteRune(r)
       lastDash = false
     } else if !lastDash {

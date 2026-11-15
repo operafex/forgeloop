@@ -11,8 +11,10 @@ import (
   "os/exec"
   "path/filepath"
   "regexp"
+  "sort"
   "strconv"
   "strings"
+  "sync"
   "time"
   "unicode"
 )
@@ -25,12 +27,13 @@ type StackConfig struct {
 }
 
 type AgentBinding struct {
-  Forge string
+  Forge string // rótulo da Etapa (ex.: "ETAPA 1"); nome do campo mantido por compatibilidade
   Alias string
   Bin   string
   Model string
   Skill string
   Args  string
+  Stage string // nome da etapa (ex.: BLUEPRINT), usado no spinner e nos logs
 }
 
 type TokenStats struct {
@@ -61,61 +64,84 @@ func main() {
   loadEnvFile(".forge/models.env")
   loadEnvFile(".forge/project.env")
 
-  setupMode := flag.Bool("setup", false, "Forge 0 (Discovery): analisa projeto existente e mapeia documentação")
+  setupMode := flag.Bool("setup", false, "Etapa 0 (Discovery): analisa projeto existente e mapeia documentação")
   taskFlag := flag.String("task", "", "Descrição da nova demanda (salva automaticamente em /docs/demands/)")
-  startForge := flag.Int("forge", 1, "Forge inicial: 1 (Completa), 2 (Temper/Skeptic), 3 (Strike/Builder)")
+  initMode := flag.Bool("init", false, "Verifica binários, instala skills ausentes (npx skills add) e cria a estrutura de pastas")
+  forceSkills := flag.Bool("force-skills", false, "Com -init: reinstala/atualiza todas as skills configuradas, mesmo as já presentes")
+  stageFlag := flag.Int("stage", 1, "Etapa inicial da Forja: 1 (ciclo completo), 2 (Temper/Skeptic), 3 (Strike/Builder)")
+  forgeAlias := flag.Int("forge", 1, "Alias de compatibilidade para -stage")
   maxAttempts := flag.Int("max-attempts", getEnvInt("FORGE_MAX_ATTEMPTS", 3), "Limite máximo de tentativas no loop (Circuit Breaker)")
   docsDirFlag := flag.String("docs-dir", getEnv("FORGE_DOCS_DIR", getEnv("FORGE_DEFAULT_DOCS_DIR", "docs")), "Diretório de documentação")
   jsonMetrics := flag.Bool("json-metrics", true, "Extrai contagem exata de tokens via --output-format json quando suportado")
 
   // Bindings desacoplados: troque via .forge/models.env ou flags CLI
-  onbBin := flag.String("onboarder-bin", getEnv("FORGE_ONBOARDER_BIN", "claude"), "Binário da Forge 0 (ONBOARDER)")
-  onbModel := flag.String("onboarder-model", getEnv("FORGE_ONBOARDER_MODEL", "opus"), "Modelo da Forge 0 (ONBOARDER)")
-  onbArgs := flag.String("onboarder-args", getEnv("FORGE_ONBOARDER_ARGS", ""), "Argumentos extras do CLI da Forge 0 (ONBOARDER)")
+  onbBin := flag.String("onboarder-bin", getEnv("FORGE_ONBOARDER_BIN", "claude"), "Binário da Etapa 0 (ONBOARDER)")
+  onbModel := flag.String("onboarder-model", getEnv("FORGE_ONBOARDER_MODEL", "opus"), "Modelo da Etapa 0 (ONBOARDER)")
+  onbArgs := flag.String("onboarder-args", getEnv("FORGE_ONBOARDER_ARGS", ""), "Argumentos extras do CLI da Etapa 0 (ONBOARDER)")
 
-  archBin := flag.String("architect-bin", getEnv("FORGE_ARCHITECT_BIN", "claude"), "Binário da Forge 1 (ARCHITECT)")
-  archModel := flag.String("architect-model", getEnv("FORGE_ARCHITECT_MODEL", "opus"), "Modelo da Forge 1 (ARCHITECT)")
-  archSkill := flag.String("architect-skill", getEnv("FORGE_ARCHITECT_SKILL", "superpowers"), "Skill da Forge 1 (ARCHITECT)")
-  archArgs := flag.String("architect-args", getEnv("FORGE_ARCHITECT_ARGS", ""), "Argumentos extras do CLI da Forge 1 (ARCHITECT)")
+  archBin := flag.String("architect-bin", getEnv("FORGE_ARCHITECT_BIN", "claude"), "Binário da Etapa 1 (ARCHITECT)")
+  archModel := flag.String("architect-model", getEnv("FORGE_ARCHITECT_MODEL", "opus"), "Modelo da Etapa 1 (ARCHITECT)")
+  archSkill := flag.String("architect-skill", getEnv("FORGE_ARCHITECT_SKILL", "obra/superpowers"), "Skill da Etapa 1 (ARCHITECT)")
+  archArgs := flag.String("architect-args", getEnv("FORGE_ARCHITECT_ARGS", ""), "Argumentos extras do CLI da Etapa 1 (ARCHITECT)")
 
-  skepBin := flag.String("skeptic-bin", getEnv("FORGE_SKEPTIC_BIN", "agy"), "Binário da Forge 2 (SKEPTIC)")
-  skepModel := flag.String("skeptic-model", getEnv("FORGE_SKEPTIC_MODEL", "GPT-OSS 120B (Medium)"), "Modelo da Forge 2 (SKEPTIC)")
-  skepSkill := flag.String("skeptic-skill", getEnv("FORGE_SKEPTIC_SKILL", "elephant-goldfish-model"), "Skill da Forge 2 (SKEPTIC)")
-  skepArgs := flag.String("skeptic-args", getEnv("FORGE_SKEPTIC_ARGS", ""), "Argumentos extras do CLI da Forge 2 (SKEPTIC)")
+  skepBin := flag.String("skeptic-bin", getEnv("FORGE_SKEPTIC_BIN", "agy"), "Binário da Etapa 2 (SKEPTIC)")
+  skepModel := flag.String("skeptic-model", getEnv("FORGE_SKEPTIC_MODEL", "GPT-OSS 120B (Medium)"), "Modelo da Etapa 2 (SKEPTIC)")
+  skepSkill := flag.String("skeptic-skill", getEnv("FORGE_SKEPTIC_SKILL", "google/elephant-goldfish-model"), "Skill da Etapa 2 (SKEPTIC)")
+  skepArgs := flag.String("skeptic-args", getEnv("FORGE_SKEPTIC_ARGS", "--dangerously-skip-permissions"), "Argumentos extras do CLI da Etapa 2 (SKEPTIC)")
 
-  buildBin := flag.String("builder-bin", getEnv("FORGE_BUILDER_BIN", "agy"), "Binário da Forge 3 (BUILDER)")
-  buildModel := flag.String("builder-model", getEnv("FORGE_BUILDER_MODEL", "Gemini 3.8 Flash"), "Modelo da Forge 3 (BUILDER)")
-  buildArgs := flag.String("builder-args", getEnv("FORGE_BUILDER_ARGS", ""), "Argumentos extras do CLI da Forge 3 (BUILDER)")
+  buildBin := flag.String("builder-bin", getEnv("FORGE_BUILDER_BIN", "agy"), "Binário da Etapa 3 (BUILDER)")
+  buildModel := flag.String("builder-model", getEnv("FORGE_BUILDER_MODEL", "Gemini 3.8 Flash (High)"), "Modelo da Etapa 3 (BUILDER)")
+  buildArgs := flag.String("builder-args", getEnv("FORGE_BUILDER_ARGS", "--dangerously-skip-permissions"), "Argumentos extras do CLI da Etapa 3 (BUILDER)")
 
-  sentBin := flag.String("sentinel-bin", getEnv("FORGE_SENTINEL_BIN", "agy"), "Binário da Forge 4B (SENTINEL)")
-  sentModel := flag.String("sentinel-model", getEnv("FORGE_SENTINEL_MODEL", "Claude Sonnet 4.6 (Thinking)"), "Modelo da Forge 4B (SENTINEL)")
-  sentSkill := flag.String("sentinel-skill", getEnv("FORGE_SENTINEL_SKILL", "cloudflare/security-audit-skill"), "Skill da Forge 4B (SENTINEL)")
-  sentArgs := flag.String("sentinel-args", getEnv("FORGE_SENTINEL_ARGS", ""), "Argumentos extras do CLI da Forge 4B (SENTINEL)")
+  sentBin := flag.String("sentinel-bin", getEnv("FORGE_SENTINEL_BIN", "agy"), "Binário da Etapa 4B (SENTINEL)")
+  sentModel := flag.String("sentinel-model", getEnv("FORGE_SENTINEL_MODEL", "Claude Sonnet 4.6 (Thinking)"), "Modelo da Etapa 4B (SENTINEL)")
+  sentSkill := flag.String("sentinel-skill", getEnv("FORGE_SENTINEL_SKILL", "cloudflare/security-audit-skill"), "Skill da Etapa 4B (SENTINEL)")
+  sentArgs := flag.String("sentinel-args", getEnv("FORGE_SENTINEL_ARGS", "--dangerously-skip-permissions"), "Argumentos extras do CLI da Etapa 4B (SENTINEL)")
 
-  arbBin := flag.String("arbiter-bin", getEnv("FORGE_ARBITER_BIN", "agy"), "Binário da Forge 5 (ARBITER)")
-  arbModel := flag.String("arbiter-model", getEnv("FORGE_ARBITER_MODEL", "Claude Sonnet 4.6 (Thinking)"), "Modelo da Forge 5 (ARBITER)")
-  arbArgs := flag.String("arbiter-args", getEnv("FORGE_ARBITER_ARGS", ""), "Argumentos extras do CLI da Forge 5 (ARBITER)")
+  arbBin := flag.String("arbiter-bin", getEnv("FORGE_ARBITER_BIN", "agy"), "Binário da Etapa 5 (ARBITER)")
+  arbModel := flag.String("arbiter-model", getEnv("FORGE_ARBITER_MODEL", "Claude Sonnet 4.6 (Thinking)"), "Modelo da Etapa 5 (ARBITER)")
+  arbArgs := flag.String("arbiter-args", getEnv("FORGE_ARBITER_ARGS", "--dangerously-skip-permissions"), "Argumentos extras do CLI da Etapa 5 (ARBITER)")
 
   flag.Parse()
+
+  setFlags := map[string]bool{}
+  flag.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
+  startStage, stageErr := resolveStage(*stageFlag, *forgeAlias, setFlags["stage"], setFlags["forge"])
+  if stageErr != nil {
+    fatal("%v", stageErr)
+  }
 
   if err := os.MkdirAll(".forge", 0755); err != nil {
     fatal("Erro ao criar diretório .forge: %v", err)
   }
 
-  onboarder := AgentBinding{Forge: "FORGE 0", Alias: "ONBOARDER", Bin: *onbBin, Model: *onbModel, Args: *onbArgs}
-  architect := AgentBinding{Forge: "FORGE 1", Alias: "ARCHITECT", Bin: *archBin, Model: *archModel, Skill: *archSkill, Args: *archArgs}
-  skeptic := AgentBinding{Forge: "FORGE 2", Alias: "SKEPTIC", Bin: *skepBin, Model: *skepModel, Skill: *skepSkill, Args: *skepArgs}
-  builder := AgentBinding{Forge: "FORGE 3", Alias: "BUILDER", Bin: *buildBin, Model: *buildModel, Args: *buildArgs}
-  sentinel := AgentBinding{Forge: "FORGE 4B", Alias: "SENTINEL", Bin: *sentBin, Model: *sentModel, Skill: *sentSkill, Args: *sentArgs}
-  arbiter := AgentBinding{Forge: "FORGE 5", Alias: "ARBITER", Bin: *arbBin, Model: *arbModel, Args: *arbArgs}
+  onboarder := AgentBinding{Forge: "ETAPA 0", Stage: "DISCOVERY", Alias: "ONBOARDER", Bin: *onbBin, Model: *onbModel, Args: *onbArgs}
+  architect := AgentBinding{Forge: "ETAPA 1", Stage: "BLUEPRINT", Alias: "ARCHITECT", Bin: *archBin, Model: *archModel, Skill: *archSkill, Args: *archArgs}
+  skeptic := AgentBinding{Forge: "ETAPA 2", Stage: "TEMPER", Alias: "SKEPTIC", Bin: *skepBin, Model: *skepModel, Skill: *skepSkill, Args: *skepArgs}
+  builder := AgentBinding{Forge: "ETAPA 3", Stage: "STRIKE", Alias: "BUILDER", Bin: *buildBin, Model: *buildModel, Args: *buildArgs}
+  sentinel := AgentBinding{Forge: "ETAPA 4B", Stage: "QUENCH APPSEC", Alias: "SENTINEL", Bin: *sentBin, Model: *sentModel, Skill: *sentSkill, Args: *sentArgs}
+  arbiter := AgentBinding{Forge: "ETAPA 5", Stage: "ASSAY", Alias: "ARBITER", Bin: *arbBin, Model: *arbModel, Args: *arbArgs}
 
   reader := bufio.NewReader(os.Stdin)
 
   // =========================================================================
-  // FORGE 0 — DISCOVERY (-setup): ANÁLISE DE PROJETO EXISTENTE
+  // -init: verificação de binários, instalação de skills e estrutura de pastas
+  // =========================================================================
+  if *initMode {
+    initDocs := strings.Trim(strings.TrimSpace(*docsDirFlag), "/")
+    if initDocs == "" {
+      initDocs = "docs"
+    }
+    runInit(initDocs, []AgentBinding{onboarder, architect, skeptic, builder, sentinel, arbiter}, *forceSkills)
+    return
+  }
+
+  // =========================================================================
+  // ETAPA 0 — DISCOVERY (-setup): ANÁLISE DE PROJETO EXISTENTE
   // =========================================================================
   if *setupMode {
     runProjectSetup(reader, onboarder, *docsDirFlag, *jsonMetrics)
+    finish(0)
     return
   }
 
@@ -126,35 +152,51 @@ func main() {
   }
 
   task := strings.TrimSpace(*taskFlag)
-  if *startForge == 1 && task == "" {
+  if startStage == 1 && task == "" {
     fmt.Print("\nDescreva a nova demanda ou feature: ")
     input, _ := reader.ReadString('\n')
     task = strings.TrimSpace(input)
     if task == "" {
-      fatal("A descrição da demanda não pode estar vazia na Forge 1.")
+      fatal("A descrição da demanda não pode estar vazia na Etapa 1.")
     }
   }
 
   modelsSummary := fmt.Sprintf("F1:%s | F2:%s | F3:%s | F4B:%s | F5:%s",
     architect.Model, skeptic.Model, builder.Model, sentinel.Model, arbiter.Model)
 
+  // Log completo da execução em <DOCS_DIR>/logs/ (um arquivo por execução).
+  logSuffix := fmt.Sprintf("forge%d", startStage)
+  if task != "" {
+    logSuffix = slugify(task)
+  }
+  startRunLog(docsDir, logSuffix)
+  logName := ""
+  if runLog != nil {
+    logName = runLog.Name
+  }
+
   demandFile := ""
   if task != "" {
-    demandFile = registerDemandInDocs(docsDir, stack.Name, task, modelsSummary)
+    demandFile = registerDemandInDocs(docsDir, stack.Name, task, modelsSummary, logName)
     fmt.Printf("\n[DOCS] Demanda registrada em: %s\n", demandFile)
   }
+
+  logBlock("CABEÇALHO DA EXECUÇÃO", buildRunHeader(stack, []AgentBinding{architect, skeptic, builder, sentinel, arbiter},
+    task, demandFile, startStage, *maxAttempts, docsDir))
 
   var totalTokens TokenStats
   var breakdown []string
 
-  printBanner("FORGELOOP INICIADO",
+  preflightSkills(stageSkills(startStage, architect, skeptic, sentinel))
+
+  printBanner("A FORJA (FORGELOOP) INICIADA",
     fmt.Sprintf("Stack: %s | Docs: /%s | Max Tentativas: %d\nBindings: %s", stack.Name, docsDir, *maxAttempts, modelsSummary))
 
   // =========================================================================
-  // FORGE 1 — BLUEPRINT: ARCHITECT (Spec-TDD-Planner / Superpowers)
+  // ETAPA 1 — BLUEPRINT: ARCHITECT (Spec-TDD-Planner / Superpowers)
   // =========================================================================
-  if *startForge <= 1 {
-    printBanner("FORGE 1: BLUEPRINT — ARCHITECT", fmt.Sprintf("Skill: %s | Modelo: %s (%s)", architect.Skill, architect.Model, architect.Bin))
+  if startStage <= 1 {
+    printBanner("ETAPA 1: BLUEPRINT — ARCHITECT", fmt.Sprintf("Skill: %s | Modelo: %s (%s)", architect.Skill, architect.Model, architect.Bin))
     prompt := fmt.Sprintf(
       "Siga estritamente as instruções de @.forge/01_ARCHITECT.md aplicando a skill %s. "+
         "Diretório de documentação do projeto: %s/ (leia %s/PROJECT_CONTEXT.md se existir). "+
@@ -166,16 +208,16 @@ func main() {
     totalTokens.Add(stats)
     breakdown = append(breakdown, fmt.Sprintf("F1(%s): %s", architect.Alias, stats.Format()))
     if err != nil {
-      fatal("Falha na Forge 1 (ARCHITECT): %v", err)
+      fatal("Falha na Etapa 1 (ARCHITECT): %v", err)
     }
-    fmt.Printf("[TOKENS %s - %s] %s\n", architect.Forge, architect.Alias, stats.Format())
+    reportTokens(architect, stats)
   }
 
   // =========================================================================
-  // FORGE 2 — TEMPER: SKEPTIC (Cold-Global-Lens / Elephant-Goldfish)
+  // ETAPA 2 — TEMPER: SKEPTIC (Cold-Global-Lens / Elephant-Goldfish)
   // =========================================================================
-  if *startForge <= 2 {
-    printBanner("FORGE 2: TEMPER — SKEPTIC", fmt.Sprintf("Skill: %s | Modelo: %s (%s)", skeptic.Skill, skeptic.Model, skeptic.Bin))
+  if startStage <= 2 {
+    printBanner("ETAPA 2: TEMPER — SKEPTIC", fmt.Sprintf("Skill: %s | Modelo: %s (%s)", skeptic.Skill, skeptic.Model, skeptic.Bin))
     prompt := fmt.Sprintf(
       "Siga estritamente as instruções de @.forge/02_SKEPTIC.md aplicando a skill %s. "+
         "Diretório de documentação: %s/. Audite @.forge/PLAN.md, @.forge/TEST_CASES.md e os arquivos de teste recém-criados. "+
@@ -187,30 +229,31 @@ func main() {
     totalTokens.Add(stats)
     breakdown = append(breakdown, fmt.Sprintf("F2(%s): %s", skeptic.Alias, stats.Format()))
     if err != nil {
-      fatal("Falha na Forge 2 (SKEPTIC): %v", err)
+      fatal("Falha na Etapa 2 (SKEPTIC): %v", err)
     }
-    fmt.Printf("[TOKENS %s - %s] %s\n", skeptic.Forge, skeptic.Alias, stats.Format())
+    reportTokens(skeptic, stats)
 
     reviewContent, err := readFile(".forge/SPEC_REVIEW.md")
     if err != nil {
       fatal("Não foi possível ler .forge/SPEC_REVIEW.md: %v", err)
     }
+    logBlock(".forge/SPEC_REVIEW.md", reviewContent)
 
     if !strings.Contains(reviewContent, "SPEC_STATUS: APPROVED") {
       updateDemandStatus(demandFile, "SPEC_REVISION_REQUIRED", 0, totalTokens, breakdown)
-      appendTelemetry(stack.Name, demandFile, modelsSummary, 0, totalTokens, "SPEC_REVISION_REQUIRED", "Bloqueado pelo SKEPTIC na Forge 2")
-      printBanner("BLOQUEIO NA FORGE 2 (TEMPER)", "O SKEPTIC exigiu ajustes na especificação. Consulte .forge/SPEC_REVIEW.md e rode novamente a Forge 1.")
-      os.Exit(2)
+      appendTelemetry(stack.Name, demandFile, modelsSummary, 0, totalTokens, "SPEC_REVISION_REQUIRED", "Bloqueado pelo SKEPTIC na Etapa 2")
+      printBanner("BLOQUEIO NA ETAPA 2 (TEMPER)", "O SKEPTIC exigiu ajustes na especificação. Consulte .forge/SPEC_REVIEW.md e rode novamente a Etapa 1.")
+      finish(2)
     }
     fmt.Println("\n[OK] Especificação aprovada (SPEC_STATUS: APPROVED). Entrando no ciclo Strike -> Quench -> Assay...")
   }
 
   // =========================================================================
-  // LOOP FECHADO: FORGE 3 (STRIKE) -> FORGE 4 (QUENCH) -> FORGE 5 (ASSAY)
+  // LOOP FECHADO: ETAPA 3 (STRIKE) -> ETAPA 4 (QUENCH) -> ETAPA 5 (ASSAY)
   // =========================================================================
   for attempt := 1; attempt <= *maxAttempts; attempt++ {
-    // FORGE 3 — STRIKE: BUILDER (Contexto Limpo)
-    printBanner(fmt.Sprintf("FORGE 3: STRIKE — BUILDER (Tentativa %d/%d)", attempt, *maxAttempts),
+    // ETAPA 3 — STRIKE: BUILDER (Contexto Limpo)
+    printBanner(fmt.Sprintf("ETAPA 3: STRIKE — BUILDER (Tentativa %d/%d)", attempt, *maxAttempts),
       fmt.Sprintf("Contexto Higienizado | Modelo: %s (%s)", builder.Model, builder.Bin))
 
     execPrompt := fmt.Sprintf(
@@ -226,17 +269,17 @@ func main() {
     totalTokens.Add(bStats)
     breakdown = append(breakdown, fmt.Sprintf("F3#%d(%s): %s", attempt, builder.Alias, bStats.Format()))
     if err != nil {
-      fmt.Printf("[AVISO] BUILDER retornou erro de processo: %v\n", err)
+      fatal("Falha na Etapa 3 (BUILDER): %v (verifique FORGE_BUILDER_MODEL/FORGE_BUILDER_BIN em .forge/models.env)", err)
     }
-    fmt.Printf("[TOKENS %s - %s] %s\n", builder.Forge, builder.Alias, bStats.Format())
+    reportTokens(builder, bStats)
 
-    // FORGE 4A — QUENCH TESTS: Verificação Determinística
-    printBanner(fmt.Sprintf("FORGE 4A: QUENCH TESTS (Tentativa %d/%d)", attempt, *maxAttempts),
+    // ETAPA 4A — QUENCH TESTS: Verificação Determinística
+    printBanner(fmt.Sprintf("ETAPA 4A: QUENCH TESTS (Tentativa %d/%d)", attempt, *maxAttempts),
       fmt.Sprintf("Runner Determinístico (%s)", stack.Name))
     checksPassed := runDeterministicChecks(stack)
 
-    // FORGE 4B — QUENCH APPSEC: SENTINEL
-    printBanner(fmt.Sprintf("FORGE 4B: QUENCH APPSEC — SENTINEL (Tentativa %d/%d)", attempt, *maxAttempts),
+    // ETAPA 4B — QUENCH APPSEC: SENTINEL
+    printBanner(fmt.Sprintf("ETAPA 4B: QUENCH APPSEC — SENTINEL (Tentativa %d/%d)", attempt, *maxAttempts),
       fmt.Sprintf("Skill: %s | Modelo: %s", sentinel.Skill, sentinel.Model))
 
     secPrompt := fmt.Sprintf(
@@ -244,16 +287,30 @@ func main() {
         "Audite o git diff atual e grave o relatório em .forge/SECURITY_REPORT.md.",
       sentinel.Skill,
     )
+    secReportPath := ".forge/SECURITY_REPORT.md"
+    var secModBefore time.Time
+    if fi, statErr := os.Stat(secReportPath); statErr == nil {
+      secModBefore = fi.ModTime()
+    }
     sStats, err := runAgent(sentinel, secPrompt, *jsonMetrics)
     totalTokens.Add(sStats)
     breakdown = append(breakdown, fmt.Sprintf("F4B#%d(%s): %s", attempt, sentinel.Alias, sStats.Format()))
     if err != nil {
       fmt.Printf("[AVISO] SENTINEL (AppSec) retornou erro de processo: %v\n", err)
+      logEvent("AVISO: SENTINEL retornou erro de processo: %v", err)
     }
-    fmt.Printf("[TOKENS %s - %s] %s\n", sentinel.Forge, sentinel.Alias, sStats.Format())
+    if secContent, readErr := readFile(secReportPath); readErr == nil {
+      logBlock(".forge/SECURITY_REPORT.md (tentativa "+strconv.Itoa(attempt)+")", secContent)
+    }
+    if fi, statErr := os.Stat(secReportPath); statErr != nil {
+      fmt.Printf("[AVISO] SENTINEL não gerou %s. A auditoria de segurança NÃO foi registrada (verifique permissões em FORGE_SENTINEL_ARGS).\n", secReportPath)
+    } else if !secModBefore.IsZero() && !fi.ModTime().After(secModBefore) {
+      fmt.Printf("[AVISO] SENTINEL não atualizou %s nesta tentativa; o relatório é de uma execução anterior.\n", secReportPath)
+    }
+    reportTokens(sentinel, sStats)
 
-    // FORGE 5 — ASSAY: ARBITER (Juiz Semântico & Circuit Breaker)
-    printBanner(fmt.Sprintf("FORGE 5: ASSAY — ARBITER (Tentativa %d/%d)", attempt, *maxAttempts),
+    // ETAPA 5 — ASSAY: ARBITER (Juiz Semântico & Circuit Breaker)
+    printBanner(fmt.Sprintf("ETAPA 5: ASSAY — ARBITER (Tentativa %d/%d)", attempt, *maxAttempts),
       fmt.Sprintf("Modelo: %s (%s)", arbiter.Model, arbiter.Bin))
 
     arbPrompt := fmt.Sprintf(
@@ -268,41 +325,43 @@ func main() {
     totalTokens.Add(aStats)
     breakdown = append(breakdown, fmt.Sprintf("F5#%d(%s): %s", attempt, arbiter.Alias, aStats.Format()))
     if err != nil {
-      fatal("Falha na Forge 5 (ARBITER): %v", err)
+      fatal("Falha na Etapa 5 (ARBITER): %v", err)
     }
-    fmt.Printf("[TOKENS %s - %s] %s\n", arbiter.Forge, arbiter.Alias, aStats.Format())
-    fmt.Printf("[TOKENS ACUMULADOS NO FORGELOOP] %s\n", totalTokens.Format())
+    reportTokens(arbiter, aStats)
+    fmt.Printf("[TOKENS ACUMULADOS NA FORJA] %s\n", totalTokens.Format())
+    logEvent("TOKENS ACUMULADOS NA FORJA: %s", totalTokens.Format())
 
     decisionContent, err := readFile(".forge/DECISION.md")
     if err != nil {
       fatal("Não foi possível ler .forge/DECISION.md: %v", err)
     }
+    logBlock(".forge/DECISION.md (tentativa "+strconv.Itoa(attempt)+")", decisionContent)
 
     switch {
     case strings.Contains(decisionContent, "DECISION: APPROVE_MERGE"):
       updateDemandStatus(demandFile, "APPROVED", attempt, totalTokens, breakdown)
       appendTelemetry(stack.Name, demandFile, modelsSummary, attempt, totalTokens, "APPROVED", "Testes, AppSec e Diff-Judge aprovados")
-      printBanner("FORGELOOP CONCLUÍDO — APPROVE_MERGE",
+      printBanner("A FORJA CONCLUÍDA — APPROVE_MERGE",
         fmt.Sprintf("Aprovado em %d tentativa(s) | Gasto Total: %s", attempt, totalTokens.Format()))
-      os.Exit(0)
+      finish(0)
 
     case strings.Contains(decisionContent, "DECISION: AMEND_TEST"):
       updateDemandStatus(demandFile, "AMEND_TEST", attempt, totalTokens, breakdown)
-      appendTelemetry(stack.Name, demandFile, modelsSummary, attempt, totalTokens, "AMEND_TEST", "Erro detectado no teste da Forge 1")
-      printBanner("INTERVENÇÃO NECESSÁRIA — AMEND_TEST", "O ARBITER identificou bug em um teste da Forge 1. Revise .forge/DECISION.md.")
-      os.Exit(3)
+      appendTelemetry(stack.Name, demandFile, modelsSummary, attempt, totalTokens, "AMEND_TEST", "Erro detectado no teste da Etapa 1")
+      printBanner("INTERVENÇÃO NECESSÁRIA — AMEND_TEST", "O ARBITER identificou bug em um teste da Etapa 1. Revise .forge/DECISION.md.")
+      finish(3)
 
     case strings.Contains(decisionContent, "DECISION: ESCALATE_ARCHITECT"):
       updateDemandStatus(demandFile, "ESCALATE_ARCHITECT", attempt, totalTokens, breakdown)
       appendTelemetry(stack.Name, demandFile, modelsSummary, attempt, totalTokens, "ESCALATE_ARCHITECT", "Escalonado para revisão arquitetural")
       printBanner("CIRCUIT BREAKER — ESCALATE_ARCHITECT", "Falha estrutural ou limite atingido. Consulte .forge/DECISION.md.")
-      os.Exit(4)
+      finish(4)
 
     case strings.Contains(decisionContent, "DECISION: RETRY_EXECUTION"):
       if !checksPassed {
-        fmt.Println("\n[LOOP] Testes falharam na Forge 4A. Reiniciando Forge 3 (Strike) com contexto limpo...")
+        fmt.Println("\n[LOOP] Testes falharam na Etapa 4A. Reiniciando Etapa 3 (Strike) com contexto limpo...")
       } else {
-        fmt.Println("\n[LOOP] Apontamento de segurança ou qualidade semântica. Reiniciando Forge 3 (Strike)...")
+        fmt.Println("\n[LOOP] Apontamento de segurança ou qualidade semântica. Reiniciando Etapa 3 (Strike)...")
       }
       continue
 
@@ -317,11 +376,11 @@ func main() {
   appendTelemetry(stack.Name, demandFile, modelsSummary, *maxAttempts, totalTokens, "CIRCUIT_BREAKER_TRIPPED", "Limite máximo de tentativas excedido")
   printBanner("CIRCUIT BREAKER ACIONADO",
     fmt.Sprintf("Limite de %d tentativas atingido | Gasto Total: %s", *maxAttempts, totalTokens.Format()))
-  os.Exit(1)
+  finish(1)
 }
 
 func runProjectSetup(reader *bufio.Reader, onboarder AgentBinding, defaultDocs string, jsonMetrics bool) {
-  printBanner("FORGE 0: DISCOVERY — SETUP DE PROJETO EXISTENTE",
+  printBanner("ETAPA 0: DISCOVERY — SETUP DE PROJETO EXISTENTE",
     fmt.Sprintf("Agente: %s (%s / %s)", onboarder.Alias, onboarder.Bin, onboarder.Model))
 
   fmt.Print("\nOnde está localizada a documentação atual do projeto? (ex: docs, wiki, README.md ou Enter para criar /docs): ")
@@ -336,7 +395,12 @@ func runProjectSetup(reader *bufio.Reader, onboarder AgentBinding, defaultDocs s
     targetDocsDir = "docs"
   }
 
-  _ = os.MkdirAll(filepath.Join(targetDocsDir, "demands"), 0755)
+  if err := ensureDocsDirs(targetDocsDir); err != nil {
+    fatal("Erro ao criar estrutura de pastas em %s: %v", targetDocsDir, err)
+  }
+  startRunLog(targetDocsDir, "forge0")
+  logBlock("CABEÇALHO DA EXECUÇÃO", buildRunHeader(StackConfig{Name: "(n/a — Etapa 0 Discovery)"}, []AgentBinding{onboarder},
+    "", "", 0, 0, targetDocsDir))
 
   projectEnv := fmt.Sprintf("FORGE_DOCS_DIR=%s\nFORGE_EXISTING_DOCS=%s\n", targetDocsDir, existingDocs)
   _ = os.WriteFile(".forge/project.env", []byte(projectEnv), 0644)
@@ -356,21 +420,26 @@ func runProjectSetup(reader *bufio.Reader, onboarder AgentBinding, defaultDocs s
 
   stats, err := runAgent(onboarder, prompt, jsonMetrics)
   if err != nil {
-    fatal("Falha na Forge 0 (ONBOARDER): %v", err)
+    fatal("Falha na Etapa 0 (ONBOARDER): %v", err)
   }
 
-  fmt.Printf("\n[TOKENS %s - %s] %s\n", onboarder.Forge, onboarder.Alias, stats.Format())
+  reportTokens(onboarder, stats)
 
   contextPath := filepath.Join(targetDocsDir, "PROJECT_CONTEXT.md")
   if info, statErr := os.Stat(contextPath); statErr != nil || info.IsDir() {
-    fatal("Forge 0 terminou sem gerar %s. O ONBOARDER pode ter sido bloqueado por permissões (veja FORGE_ONBOARDER_ARGS em .forge/models.env) ou falhou ao gravar o arquivo.", contextPath)
+    fatal("Etapa 0 terminou sem gerar %s. O ONBOARDER pode ter sido bloqueado por permissões (veja FORGE_ONBOARDER_ARGS em .forge/models.env) ou falhou ao gravar o arquivo.", contextPath)
   }
 
-  printBanner("FORGE 0 CONCLUÍDA",
+  if err := ensureDocsStructureSection(contextPath, targetDocsDir); err != nil {
+    fmt.Printf("[AVISO] Não foi possível documentar a estrutura de pastas em %s: %v\n", contextPath, err)
+    logEvent("AVISO: falha ao documentar estrutura em %s: %v", contextPath, err)
+  }
+
+  printBanner("ETAPA 0 CONCLUÍDA",
     fmt.Sprintf("Contexto salvo em /%s/PROJECT_CONTEXT.md.\nDispare novas demandas com: go run forgeloop.go -task \"...\"", targetDocsDir))
 }
 
-func registerDemandInDocs(docsDir, stackName, task, modelsSummary string) string {
+func registerDemandInDocs(docsDir, stackName, task, modelsSummary, logName string) string {
   demandsDir := filepath.Join(docsDir, "demands")
   _ = os.MkdirAll(demandsDir, 0755)
 
@@ -378,6 +447,11 @@ func registerDemandInDocs(docsDir, stackName, task, modelsSummary string) string
   slug := slugify(task)
   fileName := fmt.Sprintf("%s-%s.md", datePrefix, slug)
   fullPath := filepath.Join(demandsDir, fileName)
+
+  logLine := ""
+  if logName != "" {
+    logLine = fmt.Sprintf("- **Log de Execução:** [`%s`](../logs/%s)\n", logName, logName)
+  }
 
   if _, err := os.Stat(fullPath); os.IsNotExist(err) {
     content := fmt.Sprintf(
@@ -388,12 +462,21 @@ func registerDemandInDocs(docsDir, stackName, task, modelsSummary string) string
         "- **Status:** `IN_PROGRESS`\n"+
         "- **Tentativas:** `0`\n"+
         "- **Tokens Totais:** `0`\n"+
-        "- **Detalhamento por Forge:** `pendente`\n\n"+
+        "- **Detalhamento por Etapa:** `pendente`\n%s\n"+
         "## Descrição Original\n\n%s\n\n"+
-        "## Blueprint & Critérios de Aceite\n\n*(Será preenchido automaticamente pelo ARCHITECT na Forge 1)*\n",
-      task, time.Now().Format("2006-01-02 15:04"), stackName, modelsSummary, task,
+        "## Blueprint & Critérios de Aceite\n\n*(Será preenchido automaticamente pelo ARCHITECT na Etapa 1)*\n",
+      task, time.Now().Format("2006-01-02 15:04"), stackName, modelsSummary, logLine, task,
     )
     _ = os.WriteFile(fullPath, []byte(content), 0644)
+  } else if logLine != "" {
+    // Demanda já registrada (nova execução no mesmo dia): vincula também o log desta execução.
+    if b, readErr := os.ReadFile(fullPath); readErr == nil && !strings.Contains(string(b), "(../logs/"+logName+")") {
+      sep := ""
+      if !strings.HasSuffix(string(b), "\n") {
+        sep = "\n"
+      }
+      _ = os.WriteFile(fullPath, append(b, []byte(sep+"\n"+logLine)...), 0644)
+    }
   }
 
   indexPath := filepath.Join(docsDir, "DEMANDS_INDEX.md")
@@ -423,13 +506,13 @@ func updateDemandStatus(demandPath, status string, attempts int, tokens TokenSta
   if err != nil {
     return
   }
-  content := string(b)
+  content := strings.Replace(string(b), "- **Detalhamento por Forge:**", "- **Detalhamento por Etapa:**", 1) // demandas antigas
   content = strings.Replace(content, "- **Status:** `IN_PROGRESS`", fmt.Sprintf("- **Status:** `%s`", status), 1)
   content = strings.Replace(content, "- **Tentativas:** `0`", fmt.Sprintf("- **Tentativas:** `%d`", attempts), 1)
   content = strings.Replace(content, "- **Tokens Totais:** `0`", fmt.Sprintf("- **Tokens Totais:** `%s`", tokens.Format()), 1)
   if len(breakdown) > 0 {
-    content = strings.Replace(content, "- **Detalhamento por Forge:** `pendente`",
-      fmt.Sprintf("- **Detalhamento por Forge:** `%s`", strings.Join(breakdown, " | ")), 1)
+    content = strings.Replace(content, "- **Detalhamento por Etapa:** `pendente`",
+      fmt.Sprintf("- **Detalhamento por Etapa:** `%s`", strings.Join(breakdown, " | ")), 1)
   }
   _ = os.WriteFile(demandPath, []byte(content), 0644)
 }
@@ -535,23 +618,53 @@ func runDeterministicChecks(stack StackConfig) bool {
       continue
     }
     fmt.Printf("\n> Executando %s: %s\n", c.label, c.cmd)
-    output, err := runShellCommand(c.cmd)
+    logEvent("ETAPA 4A: executando %s: %s", c.label, c.cmd)
+    var output string
+    var err error
+    t0 := time.Now()
+    withSpinner(fmt.Sprintf("ETAPA 4A: QUENCH TESTS | %s", c.cmd), func() {
+      output, err = runShellCommand(c.cmd)
+    })
+    fmt.Print(output)
     status := "PASSED"
     if err != nil {
       status = "FAILED"
       allPassed = false
     }
+    logBlock(fmt.Sprintf("ETAPA 4A — %s (%s) — %s [%s]", c.label, c.cmd, status, formatElapsed(time.Since(t0))), output)
     report.WriteString(fmt.Sprintf("## %s (`%s`) — %s\n\n```text\n%s\n```\n\n", c.label, c.cmd, status, output))
   }
 
-  header := fmt.Sprintf("# Relatório de Verificação Determinística (Forge 4A)\n\nALL_CHECKS_PASSED: %v\nStack: %s\nTimestamp: %s\n\n",
+  header := fmt.Sprintf("# Relatório de Verificação Determinística (Etapa 4A)\n\nALL_CHECKS_PASSED: %v\nStack: %s\nTimestamp: %s\n\n",
     allPassed, stack.Name, time.Now().Format(time.RFC3339))
 
   _ = os.WriteFile(".forge/VERIFY_REPORT.md", []byte(header+report.String()), 0644)
+  logEvent("ETAPA 4A: ALL_CHECKS_PASSED=%v", allPassed)
   return allPassed
 }
 
+func agentLabel(a AgentBinding) string {
+  stage := a.Forge
+  if a.Stage != "" {
+    stage = a.Forge + ": " + a.Stage
+  }
+  return fmt.Sprintf("%s — %s | %s", stage, a.Alias, a.Model)
+}
+
+// runAgent executa o agente (com spinner no console) e registra prompt, resposta completa e duração no log.
 func runAgent(agent AgentBinding, prompt string, tryJSON bool) (TokenStats, error) {
+  label := agentLabel(agent)
+  start := time.Now()
+  logBlock("PROMPT ENVIADO — "+label, prompt)
+
+  stats, text, err := runAgentCore(agent, label, prompt, tryJSON)
+
+  logBlock("RESPOSTA RECEBIDA — "+label, text)
+  logEvent("%s concluído em %s (erro: %v)", label, formatElapsed(time.Since(start)), err)
+  return stats, err
+}
+
+func runAgentCore(agent AgentBinding, label, prompt string, tryJSON bool) (TokenStats, string, error) {
   baseArgs := []string{}
   if strings.TrimSpace(agent.Model) != "" {
     baseArgs = append(baseArgs, "--model", agent.Model)
@@ -559,9 +672,16 @@ func runAgent(agent AgentBinding, prompt string, tryJSON bool) (TokenStats, erro
   baseArgs = append(baseArgs, strings.Fields(agent.Args)...)
   baseArgs = append(baseArgs, "-p", prompt)
 
+  // A saída do agente é sempre capturada (nunca transmitida ao vivo) enquanto o spinner redesenha a linha;
+  // ela só é impressa depois que o spinner limpa a linha.
+  run := func(args []string) (out string, err error) {
+    withSpinner(label, func() { out, err = execCapture(agent.Bin, args) })
+    return out, err
+  }
+
   if tryJSON {
     jsonArgs := append(append([]string{}, baseArgs...), "--output-format", "json")
-    rawOut, err := execCapture(agent.Bin, jsonArgs, false)
+    rawOut, err := run(jsonArgs)
     if err == nil {
       // Comando executou com sucesso: NUNCA reexecutar (evita trabalho duplicado e efeitos colaterais).
       text, stats, hasUsage, ok := parseJSONUsage(rawOut)
@@ -572,19 +692,20 @@ func runAgent(agent AgentBinding, prompt string, tryJSON bool) (TokenStats, erro
       if !ok || !hasUsage {
         stats = extractOrEstimateTokens(prompt, text)
       }
-      return stats, nil
+      return stats, text, nil
     }
     if !isUnsupportedFlagError(rawOut) {
       // Falha real do agente (não é incompatibilidade de flag): não reexecutar.
       fmt.Print(rawOut)
-      return extractOrEstimateTokens(prompt, rawOut), err
+      return extractOrEstimateTokens(prompt, rawOut), rawOut, err
     }
     // Flag --output-format não suportada pelo binário: fallback único para modo texto.
+    logEvent("%s: --output-format não suportado; fallback único para modo texto", label)
   }
 
-  rawOut, err := execCapture(agent.Bin, baseArgs, true)
-  stats := extractOrEstimateTokens(prompt, rawOut)
-  return stats, err
+  rawOut, err := run(baseArgs)
+  fmt.Print(rawOut)
+  return extractOrEstimateTokens(prompt, rawOut), rawOut, err
 }
 
 var unsupportedFlagRe = regexp.MustCompile(`(?i)(unknown|unrecognized|invalid|unexpected)\s+(option|flag|argument)|flag provided but not defined|no such option`)
@@ -593,17 +714,12 @@ func isUnsupportedFlagError(output string) bool {
   return unsupportedFlagRe.MatchString(output)
 }
 
-func execCapture(bin string, args []string, streamToConsole bool) (string, error) {
+// execCapture executa o comando capturando stdout+stderr (sem escrever no console).
+func execCapture(bin string, args []string) (string, error) {
   cmd := exec.Command(bin, args...)
   var buf bytes.Buffer
-  if streamToConsole {
-    mw := io.MultiWriter(os.Stdout, &buf)
-    cmd.Stdout = mw
-    cmd.Stderr = mw
-  } else {
-    cmd.Stdout = &buf
-    cmd.Stderr = &buf
-  }
+  cmd.Stdout = &buf
+  cmd.Stderr = &buf
   err := cmd.Run()
   return buf.String(), err
 }
@@ -627,7 +743,11 @@ func parseJSONUsage(raw string) (text string, stats TokenStats, hasUsage bool, o
     }
   }
 
-  if usage, isMap := payload["usage"].(map[string]any); isMap {
+  usage, isMap := payload["usage"].(map[string]any)
+  if !isMap {
+    usage, isMap = payload["usageMetadata"].(map[string]any)
+  }
+  if isMap {
     stats.Input = intFromMap(usage, "input_tokens", "prompt_tokens", "promptTokenCount")
     stats.Output = intFromMap(usage, "output_tokens", "completion_tokens", "candidatesTokenCount")
     stats.Total = intFromMap(usage, "total_tokens", "totalTokenCount")
@@ -649,21 +769,19 @@ func intFromMap(m map[string]any, keys ...string) int {
   return 0
 }
 
+var (
+  tokenInRe  = regexp.MustCompile(`(?i)(?:^|[^a-z0-9_])(?:input|prompt)[_\s-]*tokens["'\s:=]+(\d+)`)
+  tokenOutRe = regexp.MustCompile(`(?i)(?:^|[^a-z0-9_])(?:output|completion|candidates)[_\s-]*tokens["'\s:=]+(\d+)`)
+)
+
 func extractOrEstimateTokens(prompt, output string) TokenStats {
-  reIn := regexp.MustCompile(`(?i)(?:input|prompt)[_\s-]*tokens["'\s:=]+(\d+)`)
-  reOut := regexp.MustCompile(`(?i)(?:output|completion|candidates)[_\s-]*tokens["'\s:=]+(\d+)`)
-
-  inMatch := reIn.FindStringSubmatch(output)
-  outMatch := reOut.FindStringSubmatch(output)
-
-  if len(inMatch) > 1 && len(outMatch) > 1 {
-    inVal, _ := strconv.Atoi(inMatch[1])
-    outVal, _ := strconv.Atoi(outMatch[1])
-    return TokenStats{
-      Input:     inVal,
-      Output:    outVal,
-      Total:     inVal + outVal,
-      Estimated: false,
+  mIn := tokenInRe.FindStringSubmatch(output)
+  mOut := tokenOutRe.FindStringSubmatch(output)
+  if mIn != nil && mOut != nil {
+    inVal, errIn := strconv.Atoi(mIn[1])
+    outVal, errOut := strconv.Atoi(mOut[1])
+    if errIn == nil && errOut == nil {
+      return TokenStats{Input: inVal, Output: outVal, Total: inVal + outVal, Estimated: false}
     }
   }
 
@@ -680,9 +798,8 @@ func extractOrEstimateTokens(prompt, output string) TokenStats {
 func runShellCommand(command string) (string, error) {
   cmd := exec.Command("sh", "-c", command)
   var buf bytes.Buffer
-  mw := io.MultiWriter(os.Stdout, &buf)
-  cmd.Stdout = mw
-  cmd.Stderr = mw
+  cmd.Stdout = &buf
+  cmd.Stderr = &buf
   err := cmd.Run()
   return buf.String(), err
 }
@@ -778,10 +895,511 @@ func printBanner(title, subtitle string) {
   fmt.Printf("\n==============================================================================\n")
   fmt.Printf(" %s\n %s\n", title, subtitle)
   fmt.Printf("==============================================================================\n")
+  logEvent("BANNER: %s | %s", title, strings.ReplaceAll(subtitle, "\n", " / "))
 }
 
 func fatal(format string, args ...any) {
-  fmt.Fprintf(os.Stderr, "\n[ERRO FATAL] "+format+"\n", args...)
-  os.Exit(1)
+  msg := fmt.Sprintf(format, args...)
+  fmt.Fprintf(os.Stderr, "\n[ERRO FATAL] %s\n", msg)
+  logEvent("ERRO FATAL: %s", msg)
+  finish(1)
 }
 
+// finish registra o código de saída, informa o caminho do log e encerra o processo.
+func finish(code int) {
+  if runLog != nil {
+    logEvent("Código de saída final: %d", code)
+    fmt.Printf("\n[LOG] Registro completo salvo em: %s\n", runLog.Path)
+    runLog.Close()
+    runLog = nil
+  }
+  os.Exit(code)
+}
+
+func reportTokens(a AgentBinding, s TokenStats) {
+  fmt.Printf("[TOKENS %s - %s] %s\n", a.Forge, a.Alias, s.Format())
+  logEvent("TOKENS %s - %s: %s", a.Forge, a.Alias, s.Format())
+}
+
+// ----------------------------------------------------------------------------
+// Estrutura de pastas e log de execução
+// ----------------------------------------------------------------------------
+
+// ensureDocsDirs cria <docs>/demands e <docs>/logs.
+func ensureDocsDirs(docsDir string) error {
+  for _, sub := range []string{"demands", "logs"} {
+    if err := os.MkdirAll(filepath.Join(docsDir, sub), 0755); err != nil {
+      return err
+    }
+  }
+  return nil
+}
+
+const docsStructureMarker = "## Estrutura de Documentação do forgeloop"
+
+// ensureDocsStructureSection acrescenta ao PROJECT_CONTEXT.md a descrição da estrutura de pastas (idempotente).
+func ensureDocsStructureSection(contextPath, docsDir string) error {
+  b, err := os.ReadFile(contextPath)
+  if err != nil {
+    return err
+  }
+  if strings.Contains(string(b), docsStructureMarker) {
+    return nil
+  }
+  section := fmt.Sprintf("\n%s\n\n"+
+    "- `%s/PROJECT_CONTEXT.md` — contexto do projeto (este arquivo).\n"+
+    "- `%s/DEMANDS_INDEX.md` — índice das demandas (`| Data | Stack | Demanda | Arquivo | Status |`).\n"+
+    "- `%s/demands/` — um arquivo `AAAA-MM-DD-<slug>.md` por demanda (descrição, blueprint, status, tentativas e tokens).\n"+
+    "- `%s/logs/` — um log completo por execução: `AAAA-MM-DD_HHMMSS-<slug>.log` (com demanda) ou `AAAA-MM-DD_HHMMSS-forge<N>.log` (sem demanda). "+
+    "Cada demanda aponta para o seu log no campo **Log de Execução**.\n",
+    docsStructureMarker, docsDir, docsDir, docsDir, docsDir)
+  sep := ""
+  if !strings.HasSuffix(string(b), "\n") {
+    sep = "\n"
+  }
+  return os.WriteFile(contextPath, append(b, []byte(sep+section)...), 0644)
+}
+
+type RunLog struct {
+  mu   sync.Mutex
+  f    *os.File
+  Path string // caminho de exibição (barras normais)
+  Name string // nome do arquivo
+}
+
+var runLog *RunLog
+
+// initRunLog cria <docs>/logs/ e o arquivo AAAA-MM-DD_HHMMSS-<suffix>.log desta execução.
+func initRunLog(docsDir, suffix string) (*RunLog, error) {
+  logsDir := filepath.Join(docsDir, "logs")
+  if err := os.MkdirAll(logsDir, 0755); err != nil {
+    return nil, err
+  }
+  name := fmt.Sprintf("%s-%s.log", time.Now().Format("2006-01-02_150405"), suffix)
+  path := filepath.Join(logsDir, name)
+  f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+  if err != nil {
+    return nil, err
+  }
+  return &RunLog{f: f, Path: filepath.ToSlash(path), Name: name}, nil
+}
+
+func startRunLog(docsDir, suffix string) {
+  l, err := initRunLog(docsDir, suffix)
+  if err != nil {
+    fmt.Fprintf(os.Stderr, "[AVISO] Não foi possível criar o log de execução: %v\n", err)
+    return
+  }
+  runLog = l
+  fmt.Printf("[LOG] Registro completo salvo em: %s\n", l.Path)
+}
+
+func (l *RunLog) write(s string) {
+  if l == nil {
+    return
+  }
+  l.mu.Lock()
+  defer l.mu.Unlock()
+  _, _ = l.f.WriteString(s)
+}
+
+func (l *RunLog) Close() {
+  if l == nil {
+    return
+  }
+  l.mu.Lock()
+  defer l.mu.Unlock()
+  _ = l.f.Sync()
+  _ = l.f.Close()
+}
+
+func stamp() string { return time.Now().Format("15:04:05") }
+
+// logEvent grava uma linha com timestamp [HH:MM:SS] (no-op se não houver log ativo).
+func logEvent(format string, args ...any) {
+  runLog.write(fmt.Sprintf("[%s] %s\n", stamp(), fmt.Sprintf(format, args...)))
+}
+
+// logBlock grava um bloco delimitado com o conteúdo integral (sem cortes).
+func logBlock(title, content string) {
+  if !strings.HasSuffix(content, "\n") {
+    content += "\n"
+  }
+  runLog.write(fmt.Sprintf("[%s] ----- INÍCIO: %s -----\n%s[%s] ----- FIM: %s -----\n", stamp(), title, content, stamp(), title))
+}
+
+func describeBinding(a AgentBinding) string {
+  return fmt.Sprintf("%s (%s) bin=%q modelo=%q skill=%q args=%q", a.Forge, a.Alias, a.Bin, a.Model, a.Skill, a.Args)
+}
+
+func buildRunHeader(stack StackConfig, agents []AgentBinding, task, demandFile string, startStage, maxAttempts int, docsDir string) string {
+  var b strings.Builder
+  fmt.Fprintf(&b, "Data/Hora: %s\n", time.Now().Format(time.RFC3339))
+  fmt.Fprintf(&b, "Stack: %s\n", stack.Name)
+  fmt.Fprintf(&b, "Comando de testes: %s\nComando de tipos/vet: %s\nComando de linter: %s\n", stack.TestCmd, stack.TypeCmd, stack.LintCmd)
+  fmt.Fprintf(&b, "Etapa inicial: %d | Max tentativas: %d | Docs: %s/\n", startStage, maxAttempts, docsDir)
+  b.WriteString("Bindings:\n")
+  for _, a := range agents {
+    fmt.Fprintf(&b, "  - %s\n", describeBinding(a))
+  }
+  if task == "" {
+    task = "(sem demanda)"
+  }
+  fmt.Fprintf(&b, "Demanda: %s\n", task)
+  if demandFile != "" {
+    fmt.Fprintf(&b, "Arquivo da demanda: %s\n", demandFile)
+  }
+  return b.String()
+}
+
+// ----------------------------------------------------------------------------
+// Spinner de progresso
+// ----------------------------------------------------------------------------
+
+var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+func isTerminal(f *os.File) bool {
+  fi, err := f.Stat()
+  return err == nil && fi.Mode()&os.ModeCharDevice != 0
+}
+
+func formatElapsed(d time.Duration) string {
+  secs := int(d.Seconds())
+  return fmt.Sprintf("%02d:%02d", secs/60, secs%60)
+}
+
+// withSpinner executa fn exibindo um spinner no stdout (apenas em TTY; fora dele imprime uma linha estática).
+// O spinner escreve somente no console: nunca toca no arquivo de log nem na captura do comando.
+func withSpinner(label string, fn func()) {
+  withSpinnerTo(os.Stdout, isTerminal(os.Stdout), label, fn)
+}
+
+func withSpinnerTo(w io.Writer, tty bool, label string, fn func()) {
+  if !tty {
+    fmt.Fprintf(w, "[AGUARDE] [%s] Processando...\n", label)
+    fn()
+    return
+  }
+
+  start := time.Now()
+  stop := make(chan struct{})
+  done := make(chan struct{})
+  go func() {
+    defer close(done)
+    ticker := time.NewTicker(100 * time.Millisecond)
+    defer ticker.Stop()
+    i := 0
+    draw := func() {
+      fmt.Fprintf(w, "\r\033[K%s [%s] Processando... (%s)", spinnerFrames[i%len(spinnerFrames)], label, formatElapsed(time.Since(start)))
+      i++
+    }
+    draw()
+    for {
+      select {
+      case <-stop:
+        fmt.Fprint(w, "\r\033[K")
+        return
+      case <-ticker.C:
+        draw()
+      }
+    }
+  }()
+  defer func() {
+    close(stop)
+    <-done
+  }()
+  fn()
+}
+
+// ----------------------------------------------------------------------------
+// Etapa inicial (-stage / -forge)
+// ----------------------------------------------------------------------------
+
+// resolveStage consolida -stage (principal) e -forge (alias de compatibilidade).
+func resolveStage(stage, forge int, stageSet, forgeSet bool) (int, error) {
+  if stageSet && forgeSet && stage != forge {
+    return 0, fmt.Errorf("-stage (%d) e -forge (%d) divergem; use apenas -stage", stage, forge)
+  }
+  v := stage
+  if !stageSet && forgeSet {
+    v = forge
+  }
+  if v < 1 || v > 3 {
+    return 0, fmt.Errorf("etapa inicial inválida: %d (use 1, 2 ou 3)", v)
+  }
+  return v, nil
+}
+
+// ----------------------------------------------------------------------------
+// -init: binários, skills e estrutura de pastas
+// ----------------------------------------------------------------------------
+
+type BinStatus struct {
+  Name  string
+  Path  string
+  Found bool
+}
+
+// checkBinaries verifica a disponibilidade de cada binário (sem duplicatas, na ordem informada).
+func checkBinaries(names []string, lookPath func(string) (string, error)) []BinStatus {
+  seen := map[string]bool{}
+  var res []BinStatus
+  for _, n := range names {
+    n = strings.TrimSpace(n)
+    if n == "" || seen[n] {
+      continue
+    }
+    seen[n] = true
+    path, err := lookPath(n)
+    res = append(res, BinStatus{Name: n, Path: path, Found: err == nil})
+  }
+  return res
+}
+
+var skillEnvRe = regexp.MustCompile(`^FORGE_[A-Z0-9]+_SKILL$`)
+
+// collectConfiguredSkills retorna as skills únicas (ordenadas) definidas em variáveis FORGE_*_SKILL.
+func collectConfiguredSkills(environ []string) []string {
+  seen := map[string]bool{}
+  var skills []string
+  for _, kv := range environ {
+    parts := strings.SplitN(kv, "=", 2)
+    if len(parts) != 2 || !skillEnvRe.MatchString(parts[0]) {
+      continue
+    }
+    v := strings.TrimSpace(parts[1])
+    if v == "" || seen[v] {
+      continue
+    }
+    seen[v] = true
+    skills = append(skills, v)
+  }
+  sort.Strings(skills)
+  return skills
+}
+
+// skillShortName extrai o nome da skill de um identificador "dono/repositório[@versão]".
+func skillShortName(id string) string {
+  id = strings.TrimSpace(id)
+  if i := strings.LastIndex(id, "/"); i >= 0 {
+    id = id[i+1:]
+  }
+  if i := strings.Index(id, "@"); i >= 0 {
+    id = id[:i]
+  }
+  return strings.TrimSuffix(id, ".git")
+}
+
+// skillSearchRoots lista as pastas onde uma skill pode estar instalada (locais e globais).
+func skillSearchRoots(baseDir, home string) []string {
+  roots := []string{filepath.Join(baseDir, "skills"), filepath.Join(baseDir, ".agents", "skills")}
+  if home != "" {
+    roots = append(roots, filepath.Join(home, ".claude", "skills"), filepath.Join(home, ".antigravity", "skills"))
+  }
+  return roots
+}
+
+// skillInstalled considera a skill presente se existir uma pasta com o seu nome em alguma raiz
+// ou se o skills-lock.json (lockPath) registrar o identificador como origem.
+func skillInstalled(skill string, roots []string, lockPath string) bool {
+  name := skillShortName(skill)
+  if name == "" {
+    return false
+  }
+  for _, r := range roots {
+    if fi, err := os.Stat(filepath.Join(r, name)); err == nil && fi.IsDir() {
+      return true
+    }
+  }
+  if lockPath != "" {
+    if b, err := os.ReadFile(lockPath); err == nil {
+      var lock struct {
+        Skills map[string]struct {
+          Source string `json:"source"`
+        } `json:"skills"`
+      }
+      if json.Unmarshal(b, &lock) == nil {
+        for k, v := range lock.Skills {
+          if strings.EqualFold(v.Source, skill) || strings.EqualFold(k, name) {
+            return true
+          }
+        }
+      }
+    }
+  }
+  return false
+}
+
+func missingSkills(skills, roots []string, lockPath string) []string {
+  var missing []string
+  for _, sk := range skills {
+    if !skillInstalled(sk, roots, lockPath) {
+      missing = append(missing, sk)
+    }
+  }
+  return missing
+}
+
+type SkillResult struct {
+  Skill  string
+  Action string // "presente", "instalada" ou "falha"
+  Output string
+  Err    error
+}
+
+// ensureSkills instala (via install) as skills ausentes, ou todas quando force=true.
+func ensureSkills(skills, roots []string, lockPath string, force bool, install func(string) (string, error)) []SkillResult {
+  var res []SkillResult
+  for _, sk := range skills {
+    if !force && skillInstalled(sk, roots, lockPath) {
+      res = append(res, SkillResult{Skill: sk, Action: "presente"})
+      continue
+    }
+    out, err := install(sk)
+    r := SkillResult{Skill: sk, Action: "instalada", Output: out, Err: err}
+    if err != nil {
+      r.Action = "falha"
+    }
+    res = append(res, r)
+  }
+  return res
+}
+
+func skillInstallArgs(skill string) []string {
+  return []string{"skills", "add", skill, "-g", "-y"}
+}
+
+// stageSkills devolve as skills realmente necessárias a partir da etapa inicial.
+func stageSkills(startStage int, architect, skeptic, sentinel AgentBinding) []string {
+  var list []string
+  if startStage <= 1 {
+    list = append(list, architect.Skill)
+  }
+  if startStage <= 2 {
+    list = append(list, skeptic.Skill)
+  }
+  list = append(list, sentinel.Skill)
+  seen := map[string]bool{}
+  var out []string
+  for _, sk := range list {
+    sk = strings.TrimSpace(sk)
+    if sk != "" && !seen[sk] {
+      seen[sk] = true
+      out = append(out, sk)
+    }
+  }
+  return out
+}
+
+func currentSkillRoots() ([]string, string) {
+  cwd, _ := os.Getwd()
+  home, _ := os.UserHomeDir()
+  return skillSearchRoots(cwd, home), "skills-lock.json"
+}
+
+// preflightSkills avisa (sem bloquear) se alguma skill configurada não está instalada.
+func preflightSkills(skills []string) {
+  roots, lock := currentSkillRoots()
+  missing := missingSkills(skills, roots, lock)
+  if len(missing) == 0 {
+    return
+  }
+  msg := fmt.Sprintf("Skills configuradas e não instaladas: %s. Rode `./forgeloop -init` para instalá-las.", strings.Join(missing, ", "))
+  fmt.Printf("\n[AVISO] %s\n", msg)
+  logEvent("AVISO (pre-flight): %s", msg)
+}
+
+func runInit(docsDir string, agents []AgentBinding, forceSkills bool) {
+  printBanner("FORGELOOP -init: AMBIENTE E SKILLS", "Binários, skills (npx skills add) e estrutura de pastas")
+  code := 0
+
+  // (d) Estrutura de pastas e log primeiro, para que tudo abaixo fique registrado.
+  if err := os.MkdirAll(".forge", 0755); err != nil {
+    fatal("Erro ao criar .forge: %v", err)
+  }
+  if err := ensureDocsDirs(docsDir); err != nil {
+    fatal("Erro ao criar estrutura de pastas em %s: %v", docsDir, err)
+  }
+  startRunLog(docsDir, "init")
+  logBlock("CABEÇALHO DA EXECUÇÃO (-init)", fmt.Sprintf("Data/Hora: %s\nDocs: %s/\nForce skills: %v\n", time.Now().Format(time.RFC3339), docsDir, forceSkills))
+  fmt.Printf("[OK] Pastas prontas: .forge/, %s/demands/, %s/logs/\n", docsDir, docsDir)
+  logEvent("Pastas prontas: .forge/, %s/demands/, %s/logs/", docsDir, docsDir)
+
+  // (a) Binários
+  names := []string{}
+  for _, a := range agents {
+    names = append(names, a.Bin)
+  }
+  names = append(names, "npx", "git")
+  fmt.Println("\nBinários:")
+  npxOK := false
+  for _, b := range checkBinaries(names, exec.LookPath) {
+    if b.Found {
+      fmt.Printf("  [OK]     %s (%s)\n", b.Name, b.Path)
+      logEvent("[OK] binário %s (%s)", b.Name, b.Path)
+      if b.Name == "npx" {
+        npxOK = true
+      }
+    } else {
+      fmt.Printf("  [AUSENTE] %s\n", b.Name)
+      logEvent("[AUSENTE] binário %s", b.Name)
+      code = 1
+    }
+  }
+
+  // (b) Skills configuradas
+  skills := collectConfiguredSkills(os.Environ())
+  if len(skills) == 0 {
+    for _, a := range agents {
+      if sk := strings.TrimSpace(a.Skill); sk != "" {
+        skills = append(skills, sk)
+      }
+    }
+    skills = collectConfiguredSkills(skillEnvFrom(skills))
+  }
+  fmt.Printf("\nSkills configuradas (%d): %s\n", len(skills), strings.Join(skills, ", "))
+  logEvent("Skills configuradas: %s", strings.Join(skills, ", "))
+
+  // (c) Instalação das ausentes (ou de todas, com -force-skills)
+  roots, lock := currentSkillRoots()
+  install := func(skill string) (out string, err error) {
+    if !npxOK {
+      return "", fmt.Errorf("npx ausente no PATH")
+    }
+    args := skillInstallArgs(skill)
+    fmt.Printf("  -> npx %s\n", strings.Join(args, " "))
+    logEvent("Executando: npx %s", strings.Join(args, " "))
+    withSpinner("npx "+strings.Join(args, " "), func() { out, err = execCapture("npx", args) })
+    fmt.Print(out)
+    logBlock("npx "+strings.Join(args, " "), out)
+    return out, err
+  }
+  for _, r := range ensureSkills(skills, roots, lock, forceSkills, install) {
+    switch r.Action {
+    case "presente":
+      fmt.Printf("  [OK]     %s já instalada\n", r.Skill)
+    case "instalada":
+      fmt.Printf("  [OK]     %s instalada/atualizada\n", r.Skill)
+    default:
+      fmt.Printf("  [FALHA]  %s: %v\n", r.Skill, r.Err)
+      code = 1
+    }
+    logEvent("Skill %s: %s (erro: %v)", r.Skill, r.Action, r.Err)
+  }
+
+  if code == 0 {
+    printBanner("-init CONCLUÍDO", "Ambiente pronto. Use ./forgeloop -setup (projeto existente) ou ./forgeloop -task \"...\".")
+  } else {
+    printBanner("-init CONCLUÍDO COM PENDÊNCIAS", "Há binários ausentes ou skills com falha. Corrija e rode ./forgeloop -init novamente.")
+  }
+  finish(code)
+}
+
+// skillEnvFrom monta pares FORGE_n_SKILL=valor para reaproveitar collectConfiguredSkills (deduplicação/ordem).
+func skillEnvFrom(skills []string) []string {
+  env := make([]string, 0, len(skills))
+  for i, sk := range skills {
+    env = append(env, fmt.Sprintf("FORGE_%d_SKILL=%s", i, sk))
+  }
+  return env
+}

@@ -1,4 +1,5 @@
-# Forge 0: DISCOVERY — Agente ONBOARDER
+# Etapa 0: DISCOVERY — Agente ONBOARDER
+# A Forja (`forgeloop`) é o ciclo completo; este arquivo descreve a ETAPA 0.
 # Capacidade Ativa: Repo-Mapper (Claude Code Setup)
 
 Você está analisando um **repositório já existente** para preparar o ambiente do `forgeloop` antes que qualquer nova demanda seja planejada ou codificada.
@@ -13,7 +14,7 @@ Você está analisando um **repositório já existente** para preparar o ambient
 2. **Mapeamento Arquitetural do Código:**
    - Identifique estrutura de pastas, padrões de arquitetura, dependências principais, autenticação, banco de dados e suíte de testes atual.
 3. **Geração do Contexto Base (`<DOCS_DIR>/PROJECT_CONTEXT.md`):**
-   - Consolide em um guia objetivo para as próximas Forges:
+   - Consolide em um guia objetivo para as próximas Etapas:
      - **Visão Geral & Stack:** Linguagem, frameworks, versão e comandos de build/teste.
      - **Mapa de Diretórios:** Onde ficam models, regras de negócio, controllers/handlers e testes.
      - **Convenções & Regras de Ouro:** Padrões obrigatórios do projeto e armadilhas a evitar.

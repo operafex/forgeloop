@@ -1,41 +1,108 @@
+[Português (Brasil)](README.pt-BR.md)
+
 # forgeloop
 
-Orquestrador de **Loop Engineering** orientado a especificações, TDD estrito e auditoria de segurança automatizada, construído em Go sem dependências externas e projetado para operar 100% via sessões autenticadas por OAuth (`claude` e `agy`).
+A spec-driven **Loop Engineering** orchestrator with strict TDD and automated security auditing. Written in Go with **zero external dependencies** (standard library only) and designed to run 100% on OAuth-authenticated CLI sessions (`claude` and `agy`) — no API keys.
 
-## Ciclo de Forja: Passos
+## One Forge, Six Stages
 
-- **Step 0 — Discovery (`ONBOARDER`):** Mapeia projetos existentes e consolida a documentação em `/docs/PROJECT_CONTEXT.md`.
-- **Step 1 — Blueprint (`ARCHITECT`):** Planejamento incremental (`superpowers`) e criação de testes automatizados em estado `RED`.
-- **Step 2 — Temper (`SKEPTIC`):** Revisão crítica a frio e validação de invariantes globais (`elephant-goldfish-model`).
-- **Step 3 — Strike (`BUILDER`):** Implementação em contexto higienizado (*stateless*).
-- **Step 4 — Quench (`SENTINEL`):** Suíte determinística da stack (`4A`) + auditoria AppSec no `git diff` (`4B` via `cloudflare/security-audit-skill`).
-- **Step 5 — Assay (`ARBITER`):** Julgamento semântico, contabilização de tokens e *Circuit Breaker* (`max-attempts`).
+**The Forge (`forgeloop`)** is the complete cycle. Each internal phase is a **Stage**:
 
-## Uso Rápido
+| Stage | Name | Agent | What it does |
+| :--- | :--- | :--- | :--- |
+| 0 | `DISCOVERY` | `ONBOARDER` | Maps an existing project and consolidates its documentation into `<docs>/PROJECT_CONTEXT.md`. |
+| 1 | `BLUEPRINT` | `ARCHITECT` | Incremental planning (`obra/superpowers`) and automated tests in `RED` state. |
+| 2 | `TEMPER` | `SKEPTIC` | Cold critical review and global invariants (`google/elephant-goldfish-model`). |
+| 3 | `STRIKE` | `BUILDER` | Implementation in a sanitized (*stateless*) context. |
+| 4 | `QUENCH` | `SENTINEL` | Deterministic stack suite (4A) + AppSec audit of the `git diff` (4B, `cloudflare/security-audit-skill`). |
+| 5 | `ASSAY` | `ARBITER` | Semantic judgment, token accounting and *Circuit Breaker* (`max-attempts`). |
 
-### 1. Onboarding de Projeto Existente (Passo 0)
+Stages 3 → 4 → 5 run as a closed loop until the ARBITER approves, asks for a test amendment, escalates to the architect, or the attempt limit trips.
+
+## Requirements
+
+- Go 1.22+
+- `claude` and `agy` CLIs, logged in via OAuth
+- `npx` (Node.js) and `git`
+
+## Quick Start
+
+### 1. Prepare the environment — `-init`
+
+```bash
+go run forgeloop.go -init            # or: ./forgeloop -init
+go run forgeloop.go -init -force-skills   # reinstall/update every skill
+```
+
+`-init`:
+
+1. checks that the configured binaries (`claude`, `agy`, `npx`, `git`) are on your `$PATH` (`[OK]` / `[AUSENTE]`);
+2. collects the unique skills from the `FORGE_*_SKILL` variables (`.forge/models.env` / environment);
+3. installs the missing ones with `npx skills add <skill> -g -y` (all of them with `-force-skills`). A skill counts as present if a folder with its name exists in `skills/`, `.agents/skills/`, `~/.claude/skills/` or `~/.antigravity/skills/`, or if `skills-lock.json` lists it as a source;
+4. creates `.forge/`, `<docs>/demands/` and `<docs>/logs/` and writes its own log to `<docs>/logs/`.
+
+It exits with code `1` if a binary is missing or a skill failed to install. Every normal run also performs a quick pre-flight check and warns (without blocking) if a configured skill is not installed.
+
+### 2. Onboard an existing project — `-setup` (Stage 0)
+
 ```bash
 go run forgeloop.go -setup
-
 ```
 
-### 2. Iniciar Nova Demanda (Passos 1 a 5)
+Creates `<docs>/PROJECT_CONTEXT.md`, `<docs>/DEMANDS_INDEX.md`, `<docs>/demands/` and `<docs>/logs/`.
+
+### 3. Run a new demand — `-task` (Stages 1 to 5)
 
 ```bash
-go run forgeloop.go -task "Implementar autenticação JWT com refresh token"
-
+go run forgeloop.go -task "Implement JWT authentication with refresh tokens"
 ```
 
-### 3. Testar Combinações de Modelos
-
-Edite `.forge/models.env` ou sobrescreva via variáveis de ambiente:
+Start from a later Stage with `-stage` (`-forge` is kept as a compatibility alias):
 
 ```bash
-FORGE_BUILDER_MODEL="GPT-OSS 120B (Medium)" go run forgeloop.go -task "Adicionar paginação por cursor"
-
+go run forgeloop.go -stage 2    # TEMPER onwards (reuses the existing PLAN.md / tests)
+go run forgeloop.go -stage 3    # STRIKE onwards
 ```
 
-## Licença
+### 4. Try different model combinations
 
-Distribuído sob a **Apache License 2.0**. Veja `LICENSE` para mais detalhes.
+Edit `.forge/models.env` or override with environment variables:
 
+```bash
+FORGE_BUILDER_MODEL="GPT-OSS 120B (Medium)" go run forgeloop.go -task "Add cursor pagination"
+```
+
+Each agent has `FORGE_<AGENT>_BIN`, `_MODEL` and `_ARGS` (extra CLI flags, e.g. permission flags needed for headless mode). `--dangerously-skip-permissions` disables permission prompts: use it only in trusted repositories.
+
+## Output layout
+
+```text
+<docs>/
+├── PROJECT_CONTEXT.md     # project context (Stage 0)
+├── DEMANDS_INDEX.md       # | Data | Stack | Demanda | Arquivo | Status |
+├── demands/               # one file per demand, linked to its execution log
+└── logs/                  # one full log per run: YYYY-MM-DD_HHMMSS-<slug>.log
+.forge/                    # agent prompts, models.env, transient artifacts (PLAN, DECISION, ...)
+```
+
+Logs contain the prompt and the full response of every agent, the complete test/linter output, the generated review/security/decision reports, durations, token counts and the final exit code.
+
+## Exit codes
+
+| Code | Meaning |
+| :--- | :--- |
+| `0` | `APPROVE_MERGE` (or a successful `-init`/`-setup`) |
+| `1` | Fatal error or circuit breaker tripped |
+| `2` | Specification blocked by the SKEPTIC (Stage 2) |
+| `3` | `AMEND_TEST` — a Stage 1 test needs fixing |
+| `4` | `ESCALATE_ARCHITECT` |
+
+## Tests
+
+```bash
+go test -v -race ./... && go vet ./... && go build -o forgeloop forgeloop.go
+```
+
+## License
+
+Distributed under the **Apache License 2.0**. See `LICENSE`.

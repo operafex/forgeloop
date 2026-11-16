@@ -8,14 +8,16 @@ A spec-driven **Loop Engineering** orchestrator with strict TDD and automated se
 
 **The Forge (`forgeloop`)** is the complete cycle. Each internal phase is a **Stage**:
 
-| Stage | Name | Agent | What it does |
-| :--- | :--- | :--- | :--- |
-| 0 | `DISCOVERY` | `ONBOARDER` | Maps an existing project and consolidates its documentation into `<docs>/PROJECT_CONTEXT.md`. |
-| 1 | `BLUEPRINT` | `ARCHITECT` | Incremental planning (`obra/superpowers`) and automated tests in `RED` state. |
-| 2 | `TEMPER` | `SKEPTIC` | Cold critical review and global invariants (`google/elephant-goldfish-model`). |
-| 3 | `STRIKE` | `BUILDER` | Implementation in a sanitized (*stateless*) context. |
-| 4 | `QUENCH` | `SENTINEL` | Deterministic stack suite (4A) + AppSec audit of the `git diff` (4B, `cloudflare/security-audit-skill`). |
-| 5 | `ASSAY` | `ARBITER` | Semantic judgment, token accounting and *Circuit Breaker* (`max-attempts`). |
+| Stage | Name | Agent | Client | Default Model | What it does |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| 0 | `DISCOVERY` | `ONBOARDER` | `claude` | `opus` | Maps an existing project and consolidates its documentation into `<docs>/PROJECT_CONTEXT.md`. |
+| 1 | `BLUEPRINT` | `ARCHITECT` | `claude` | `opus` | Incremental planning (`obra/superpowers`) and automated tests in `RED` state. |
+| 2 | `TEMPER` | `SKEPTIC` | `agy` | `Gemini 3.8 Flash (Medium)` | Cold critical review and global invariants (`google/elephant-goldfish-model`). |
+| 3 | `STRIKE` | `BUILDER` | `agy` | `Gemini 3.8 Flash (High)` | Implementation in a sanitized (*stateless*) context. |
+| 4 | `QUENCH` | `SENTINEL` | `agy` *(4B)* | `Gemini 3.8 Flash (Medium)` *(4B)* | Deterministic stack suite (4A) + AppSec audit of the `git diff` (4B, `cloudflare/security-audit-skill`). |
+| 5 | `ASSAY` | `ARBITER` | `agy` | `Gemini 3.8 Flash (High)` | Semantic judgment, token accounting and *Circuit Breaker* (`max-attempts`). |
+
+> **Note:** In Stage 4 (`QUENCH`), phase 4A runs deterministic local stack tests and linters (no LLM), while phase 4B executes the AppSec audit with the `SENTINEL` agent using the indicated client and model.
 
 Stages 3 → 4 → 5 run as a closed loop until the ARBITER approves, asks for a test amendment, escalates to the architect, or the attempt limit trips.
 
@@ -30,8 +32,8 @@ Stages 3 → 4 → 5 run as a closed loop until the ARBITER approves, asks for a
 ### 1. Prepare the environment — `-init`
 
 ```bash
-go run forgeloop.go -init            # or: ./forgeloop -init
-go run forgeloop.go -init -force-skills   # reinstall/update every skill
+go run . -init            # or: ./forgeloop -init
+go run . -init -force-skills   # reinstall/update every skill
 ```
 
 `-init`:
@@ -46,21 +48,51 @@ It exits with code `1` if a binary is missing or a skill failed to install. Ever
 ### 2. Onboard an existing project — `-setup` (Stage 0)
 
 ```bash
-go run forgeloop.go -setup
+go run . -setup
 ```
 
 Creates `<docs>/PROJECT_CONTEXT.md`, `<docs>/demands/INDEX.md`, `<docs>/demands/`, `<docs>/logs/` and `<docs>/references/`.
 
+### Auto-Detected & Custom Stacks
+
+When running `-setup`, `forgeloop` deterministically inspects markers in the project root:
+- `go.mod` → Go (`go test -v -race ./...`, `go vet ./...`, and `golangci-lint run` if `.golangci.yml` or `.golangci.yaml` exists);
+- `Gemfile` with `gem 'rails'` → Ruby on Rails (`bundle exec rspec` if `spec/` directory exists, otherwise `bin/rails test`, plus `bundle exec rubocop`);
+- `package.json` → Node.js or TypeScript + Node.js (if `tsconfig.json` exists or `typescript` is in dependencies/devDependencies; `npm run lint` if `lint` is defined in `scripts`).
+
+The `ONBOARDER` agent confirms or refines the detected stack, and the configuration is saved to `.forge/config/project.env`:
+
+```env
+FORGE_STACK_NAME="Go"
+FORGE_TEST_CMD="go test -v -race ./..."
+FORGE_TYPE_CMD="go vet ./..."
+FORGE_LINT_CMD=""
+```
+
+When you start a demand with `-task`, `forgeloop` displays the saved stack as the default option:
+
+```text
+Qual stack deve ser utilizada nesta execução?
+  [1] Projeto Atual (Auto-detectado): Go
+  [2] Ruby on Rails
+  [3] Go
+  [4] TypeScript + Node.js
+  [5] Personalizada
+Escolha uma opção (1-5) [Enter = 1]: 
+```
+
+Pressing Enter defaults to option `1`. If `.forge/config/project.env` is missing or incomplete, a warning is displayed and the manual menu (options 1 to 4) is presented as fallback. You can also edit `.forge/config/project.env` manually to override commands or configure custom stacks (such as Python, Java, or Makefile).
+
 ### 3. Run a new demand — `-task` (Stages 1 to 5)
 
 ```bash
-go run forgeloop.go -task "Implement JWT authentication with refresh tokens"
+go run . -task "Implement JWT authentication with refresh tokens"
 ```
 
 Enrich the demand with material from `<docs>/references/` using `-ref` (repeatable). Each file is validated up front and handed to the ARCHITECT as `@path`, so it is read before planning:
 
 ```bash
-go run forgeloop.go -task "Implement JWT authentication with refresh tokens" \
+go run . -task "Implement JWT authentication with refresh tokens" \
   -ref auth-spec.md -ref docs/references/openapi.yaml
 ```
 
@@ -69,19 +101,65 @@ go run forgeloop.go -task "Implement JWT authentication with refresh tokens" \
 Start from a later Stage with `-stage` (`-forge` is kept as a compatibility alias):
 
 ```bash
-go run forgeloop.go -stage 2    # TEMPER onwards (reuses the existing .forge/state/PLAN.md / tests)
-go run forgeloop.go -stage 3    # STRIKE onwards
+go run . -stage 2    # TEMPER onwards (reuses the existing .forge/state/PLAN.md / tests)
+go run . -stage 3    # STRIKE onwards
 ```
 
 ### 4. Try different model combinations
 
-Edit `.forge/config/models.env` or override with environment variables:
+Edit `.forge/config/models.env` or override with environment variables (see full details in the [Model Customization](#model-customization) section):
 
 ```bash
-FORGE_BUILDER_MODEL="GPT-OSS 120B (Medium)" go run forgeloop.go -task "Add cursor pagination"
+FORGE_BUILDER_MODEL="GPT-OSS 120B (Medium)" go run . -task "Add cursor pagination"
 ```
 
 Each agent has `FORGE_<AGENT>_BIN`, `_MODEL` and `_ARGS` (extra CLI flags, e.g. permission flags needed for headless mode). `--dangerously-skip-permissions` disables permission prompts: use it only in trusted repositories.
+
+## Model Customization
+
+Default CLI clients, models, and parameters for each agent are centralized and customized in:
+
+📁 **`.forge/config/models.env`**
+
+This file is automatically loaded on `forgeloop` startup and can be committed to the repository to share project defaults.
+
+### Configuration Variables per Agent
+
+Each agent has dedicated environment variables to configure its CLI binary (`_BIN`), model (`_MODEL`), extra CLI arguments (`_ARGS`), and skill (`_SKILL` when applicable):
+
+| Stage | Agent | Client / Binary | Model | Extra Arguments | Skill |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| 0 | `ONBOARDER` | `FORGE_ONBOARDER_BIN` | `FORGE_ONBOARDER_MODEL` | `FORGE_ONBOARDER_ARGS` | — |
+| 1 | `ARCHITECT` | `FORGE_ARCHITECT_BIN` | `FORGE_ARCHITECT_MODEL` | `FORGE_ARCHITECT_ARGS` | `FORGE_ARCHITECT_SKILL` |
+| 2 | `SKEPTIC` | `FORGE_SKEPTIC_BIN` | `FORGE_SKEPTIC_MODEL` | `FORGE_SKEPTIC_ARGS` | `FORGE_SKEPTIC_SKILL` |
+| 3 | `BUILDER` | `FORGE_BUILDER_BIN` | `FORGE_BUILDER_MODEL` | `FORGE_BUILDER_ARGS` | — |
+| 4B | `SENTINEL` | `FORGE_SENTINEL_BIN` | `FORGE_SENTINEL_MODEL` | `FORGE_SENTINEL_ARGS` | `FORGE_SENTINEL_SKILL` |
+| 5 | `ARBITER` | `FORGE_ARBITER_BIN` | `FORGE_ARBITER_MODEL` | `FORGE_ARBITER_ARGS` | — |
+
+In addition to agents, `.forge/config/models.env` manages global loop settings:
+- `FORGE_MAX_ATTEMPTS`: Maximum attempts in the correction loop before circuit breaker trips (default: `3`).
+- `FORGE_DEFAULT_DOCS_DIR`: Default documentation directory (default: `docs`).
+
+### How to Customize
+
+Configuration precedence is: **CLI Flags > Environment Variables > `.forge/config/models.env` > Hardcoded defaults**.
+
+1. **Edit `.forge/config/models.env` directly** (recommended for persistent project defaults):
+   ```env
+   # Example: customize Stage 3 and Stage 5 models
+   FORGE_BUILDER_MODEL="Gemini 3.8 Flash (High)"
+   FORGE_ARBITER_MODEL="Gemini 3.8 Flash (High)"
+   ```
+
+2. **Override via environment variables** (ideal for a single run without touching config files):
+   ```bash
+   FORGE_BUILDER_MODEL="GPT-OSS 120B (Medium)" go run . -task "Add cursor pagination"
+   ```
+
+3. **Override via CLI flags**:
+   ```bash
+   go run . -builder-model "Gemini 3.8 Flash (High)" -arbiter-model "Gemini 3.8 Flash (High)" -task "Add cursor pagination"
+   ```
 
 ## Output layout
 
@@ -116,7 +194,7 @@ Logs contain the prompt and the full response of every agent, the complete test/
 ## Tests
 
 ```bash
-go test -v -race ./... && go vet ./... && go build -o forgeloop forgeloop.go
+go test -v -race ./... && go vet ./... && go build -o forgeloop .
 ```
 
 ## License

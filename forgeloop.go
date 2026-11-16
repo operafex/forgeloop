@@ -150,7 +150,10 @@ func main() {
     return
   }
 
-  stack := selectStack(reader)
+  stack, err := selectStack(reader, os.Stdout, projectEnvPath)
+  if err != nil {
+    fatal("%v", err)
+  }
   docsDir := strings.Trim(strings.TrimSpace(*docsDirFlag), "/")
   if docsDir == "" {
     docsDir = "docs"
@@ -428,20 +431,34 @@ func runProjectSetup(reader *bufio.Reader, onboarder AgentBinding, defaultDocs s
   logBlock("CABEÇALHO DA EXECUÇÃO", buildRunHeader(StackConfig{Name: "(n/a — Etapa 0 Discovery)"}, []AgentBinding{onboarder},
     "", "", 0, 0, targetDocsDir))
 
-  projectEnv := fmt.Sprintf("FORGE_DOCS_DIR=%s\nFORGE_EXISTING_DOCS=%s\n", targetDocsDir, existingDocs)
-  _ = os.WriteFile(".forge/config/project.env", []byte(projectEnv), 0644)
+  detected, ok, envErr := setupProjectEnv(projectEnvPath, ".", targetDocsDir, existingDocs)
+  if envErr != nil {
+    fatal("Erro ao gravar %s: %v", projectEnvPath, envErr)
+  }
+  if ok {
+    fmt.Printf("[STACK] Detectada: %s (testes: %s)\n", detected.Name, detected.TestCmd)
+    logEvent("STACK DETECTADA: %s (testes: %s)", detected.Name, detected.TestCmd)
+  } else {
+    fmt.Println("[AVISO] Stack não detectada automaticamente. O ONBOARDER tentará identificá-la.")
+    logEvent("AVISO: stack não detectada automaticamente")
+  }
 
   sourceHint := existingDocs
   if sourceHint == "" {
     sourceHint = "Nenhuma documentação prévia informada (criar estrutura inicial em " + targetDocsDir + "/)"
   }
 
+  detectedHint := "(nenhuma)"
+  if ok {
+    detectedHint = detected.Name
+  }
   prompt := fmt.Sprintf(
     "Siga estritamente as instruções de @.forge/agents/00_ONBOARDER.md. "+
       "Documentação existente informada pelo usuário: '%s'. "+
       "Diretório oficial de saída para documentação: '%s/'. "+
+      "Stack pré-detectada pelo CLI: '%s'. Valide ou corrija as chaves FORGE_STACK_NAME, FORGE_TEST_CMD, FORGE_TYPE_CMD e FORGE_LINT_CMD em .forge/config/project.env, preservando as demais chaves. "+
       "Analise a estrutura do código existente, leia a documentação informada e gere %s/PROJECT_CONTEXT.md e %s/demands/INDEX.md.",
-    sourceHint, targetDocsDir, targetDocsDir, targetDocsDir,
+    sourceHint, targetDocsDir, detectedHint, targetDocsDir, targetDocsDir,
   )
 
   stats, err := runAgent(onboarder, prompt, jsonMetrics)
@@ -461,8 +478,16 @@ func runProjectSetup(reader *bufio.Reader, onboarder AgentBinding, defaultDocs s
     logEvent("AVISO: falha ao documentar estrutura em %s: %v", contextPath, err)
   }
 
-  printBanner("ETAPA 0 CONCLUÍDA",
-    fmt.Sprintf("Contexto salvo em /%s/PROJECT_CONTEXT.md.\nDispare novas demandas com: go run forgeloop.go -task \"...\"", targetDocsDir))
+  savedStack, loadErr := loadProjectStack(projectEnvPath)
+  bannerMsg := fmt.Sprintf("Contexto salvo em /%s/PROJECT_CONTEXT.md.", targetDocsDir)
+  if loadErr == nil {
+    bannerMsg += fmt.Sprintf("\nStack salva: %s", savedStack.Name)
+  } else {
+    fmt.Printf("[AVISO] Stack não configurada em project.env (motivo: %v). O menu manual será exibido no -task.\n", loadErr)
+    logEvent("AVISO: stack não configurada em project.env: %v", loadErr)
+  }
+  bannerMsg += "\nDispare novas demandas com: go run . -task \"...\""
+  printBanner("ETAPA 0 CONCLUÍDA", bannerMsg)
 }
 
 // referencesLine devolve a linha "- **Referências:**" da demanda (vazia quando não há referências).
@@ -589,66 +614,6 @@ func updateIndexStatus(demandPath, status string) {
   }
 }
 
-func selectStack(reader *bufio.Reader) StackConfig {
-  fmt.Println("\nQual stack deve ser utilizada nesta execução?")
-  fmt.Println("  [1] Ruby on Rails")
-  fmt.Println("  [2] Go")
-  fmt.Println("  [3] TypeScript + Node.js")
-  fmt.Println("  [4] Personalizada")
-  fmt.Print("Escolha uma opção (1-4): ")
-
-  choice, _ := reader.ReadString('\n')
-  switch strings.TrimSpace(choice) {
-  case "1":
-    testCmd := "bundle exec rspec"
-    if _, err := os.Stat("spec"); os.IsNotExist(err) {
-      testCmd = "bin/rails test"
-    }
-    return StackConfig{
-      Name:    "Ruby on Rails",
-      TestCmd: testCmd,
-      LintCmd: "bundle exec rubocop",
-    }
-  case "2":
-    lintCmd := ""
-    if _, err := os.Stat(".golangci.yml"); err == nil {
-      lintCmd = "golangci-lint run"
-    }
-    return StackConfig{
-      Name:    "Go",
-      TestCmd: "go test -v -race ./...",
-      TypeCmd: "go vet ./...",
-      LintCmd: lintCmd,
-    }
-  case "3":
-    lintCmd := ""
-    if pkg, err := readFile("package.json"); err == nil && strings.Contains(pkg, `"lint"`) {
-      lintCmd = "npm run lint"
-    }
-    return StackConfig{
-      Name:    "TypeScript + Node.js",
-      TestCmd: "npm test",
-      TypeCmd: "npx tsc --noEmit",
-      LintCmd: lintCmd,
-    }
-  case "4":
-    fmt.Print("Comando de Testes (ex: pytest): ")
-    tCmd, _ := reader.ReadString('\n')
-    fmt.Print("Comando de Tipos/Compilação (opcional, Enter para pular): ")
-    typeCmd, _ := reader.ReadString('\n')
-    fmt.Print("Comando de Linter (opcional, Enter para pular): ")
-    lCmd, _ := reader.ReadString('\n')
-    return StackConfig{
-      Name:    "Personalizada",
-      TestCmd: strings.TrimSpace(tCmd),
-      TypeCmd: strings.TrimSpace(typeCmd),
-      LintCmd: strings.TrimSpace(lCmd),
-    }
-  default:
-    fatal("Opção inválida. Escolha entre 1 e 4.")
-    return StackConfig{}
-  }
-}
 
 func runDeterministicChecks(stack StackConfig) bool {
   var report strings.Builder

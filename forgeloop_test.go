@@ -2,6 +2,7 @@ package main
 
 import (
   "bytes"
+  "encoding/csv"
   "os"
   "path/filepath"
   "regexp"
@@ -498,7 +499,7 @@ func TestLogFunctionsNoopWithoutActiveLog(t *testing.T) {
 func TestRegisterDemandLinksLog(t *testing.T) {
   dir := filepath.Join(t.TempDir(), "docs")
   logName := "2026-11-15_163000-criar-x.log"
-  demandPath := registerDemandInDocs(dir, "Go", "Criar x", "F1:opus", logName)
+  demandPath := registerDemandInDocs(dir, "Go", "Criar x", "F1:opus", logName, nil)
 
   b, err := os.ReadFile(demandPath)
   if err != nil {
@@ -508,7 +509,7 @@ func TestRegisterDemandLinksLog(t *testing.T) {
   if !strings.Contains(string(b), want) {
     t.Errorf("vínculo do log ausente em %s:\n%s", demandPath, b)
   }
-  if !strings.Contains(string(b), "- **Detalhamento por Etapa:** `pendente`") || !strings.Contains(string(b), "## Descrição Original") {
+  if strings.Contains(string(b), "Detalhamento por") || !strings.Contains(string(b), "## Descrição Original") {
     t.Errorf("estrutura da demanda alterada:\n%s", b)
   }
 
@@ -526,7 +527,7 @@ func TestRegisterDemandLinksLog(t *testing.T) {
   }
 
   // Status da demanda continua sincronizado com o índice.
-  updateDemandStatus(demandPath, "APPROVED", 1, TokenStats{Total: 1}, nil)
+  updateDemandStatus(demandPath, "APPROVED", 1, TokenStats{Total: 1})
   idx, _ = os.ReadFile(filepath.Join(dir, "demands", "INDEX.md"))
   if !strings.Contains(string(idx), "`APPROVED`") {
     t.Errorf("índice não sincronizado:\n%s", idx)
@@ -535,9 +536,9 @@ func TestRegisterDemandLinksLog(t *testing.T) {
 
 func TestRegisterDemandExistingFileGetsNewLogLink(t *testing.T) {
   dir := filepath.Join(t.TempDir(), "docs")
-  p := registerDemandInDocs(dir, "Go", "Mesma demanda", "m", "log-a.log")
-  registerDemandInDocs(dir, "Go", "Mesma demanda", "m", "log-b.log")
-  registerDemandInDocs(dir, "Go", "Mesma demanda", "m", "log-b.log") // idempotente
+  p := registerDemandInDocs(dir, "Go", "Mesma demanda", "m", "log-a.log", nil)
+  registerDemandInDocs(dir, "Go", "Mesma demanda", "m", "log-b.log", nil)
+  registerDemandInDocs(dir, "Go", "Mesma demanda", "m", "log-b.log", nil) // idempotente
   b, _ := os.ReadFile(p)
   if !strings.Contains(string(b), "(../logs/log-a.log)") || strings.Count(string(b), "(../logs/log-b.log)") != 1 {
     t.Errorf("vínculos de log incorretos:\n%s", b)
@@ -546,7 +547,7 @@ func TestRegisterDemandExistingFileGetsNewLogLink(t *testing.T) {
 
 func TestRegisterDemandWithoutLogOmitsField(t *testing.T) {
   dir := filepath.Join(t.TempDir(), "docs")
-  p := registerDemandInDocs(dir, "Go", "Sem log", "m", "")
+  p := registerDemandInDocs(dir, "Go", "Sem log", "m", "", nil)
   b, _ := os.ReadFile(p)
   if strings.Contains(string(b), "Log de Execução") {
     t.Errorf("campo de log não deveria existir:\n%s", b)
@@ -949,57 +950,6 @@ func TestParseJSONUsageSumsCacheTokens(t *testing.T) {
   }
 }
 
-func TestAppendTelemetryEscapesPipes(t *testing.T) {
-  orig, err := os.Getwd()
-  if err != nil {
-    t.Fatal(err)
-  }
-  dir := t.TempDir()
-  if err := os.Mkdir(filepath.Join(dir, ".forge"), 0755); err != nil {
-    t.Fatal(err)
-  }
-  if err := os.Chdir(dir); err != nil {
-    t.Fatal(err)
-  }
-  t.Cleanup(func() { _ = os.Chdir(orig) })
-
-  breakdown := []string{"F1(ARCHITECT): 1 in / 1 out (2 total)", "F3#1(BUILDER|x): 2 in / 3 out (5 total)"}
-  appendTelemetry("go|stack", "demands/a|b.md", "claude|gemini\nx", 2, TokenStats{Input: 1, Output: 2, Total: 3}, breakdown, "APPROVED", "nota com | pipe\r\ne quebra")
-
-  b, err := os.ReadFile(filepath.Join(".forge", "TELEMETRY.md"))
-  if err != nil {
-    t.Fatal(err)
-  }
-  lines := strings.Split(strings.TrimRight(string(b), "\n"), "\n")
-  var header, row string
-  for _, l := range lines {
-    if strings.HasPrefix(l, "| Data ") {
-      header = l
-    }
-    if strings.Contains(l, "APPROVED") {
-      row = l
-    }
-  }
-  if row == "" || header == "" {
-    t.Fatalf("cabeçalho/linha ausentes:\n%s", b)
-  }
-  if got, want := strings.Count(row, "|"), strings.Count(header, "|"); got != want || want != 10 {
-    t.Errorf("pipes row=%d header=%d; want 10 (9 colunas)\nrow: %s", got, want, row)
-  }
-  for _, want := range []string{"go;stack", "a;b.md", "claude;gemini x", "nota com ; pipe  e quebra",
-    "F1(ARCHITECT): 1 in / 1 out (2 total)<br>F3#1(BUILDER;x): 2 in / 3 out (5 total) | 1 in / 2 out (3 total)"} {
-    if !strings.Contains(row, want) {
-      t.Errorf("linha sem %q: %s", want, row)
-    }
-  }
-}
-
-func TestSanitizeTableCell(t *testing.T) {
-  if got := sanitizeTableCell("a|b\r\nc\nd"); got != "a;b  c d" {
-    t.Errorf("got %q", got)
-  }
-}
-
 func chdirTemp(t *testing.T) string {
   t.Helper()
   orig, err := os.Getwd()
@@ -1012,69 +962,6 @@ func chdirTemp(t *testing.T) string {
   }
   t.Cleanup(func() { _ = os.Chdir(orig) })
   return dir
-}
-
-func TestAppendTelemetryColumnOrderAndEmptyBreakdown(t *testing.T) {
-  chdirTemp(t)
-  if err := os.Mkdir(".forge", 0755); err != nil {
-    t.Fatal(err)
-  }
-  appendTelemetry("Go", "", "m", 1, TokenStats{Total: 7}, nil, "APPROVED", "ok")
-  b := readString(t, filepath.Join(".forge", "TELEMETRY.md"))
-  stage := strings.Index(b, "Tokens (Por Etapa/Loop)")
-  total := strings.Index(b, "Tokens Totais")
-  if stage < 0 || total < 0 || stage > total {
-    t.Errorf("coluna por etapa deve vir antes de Tokens Totais:\n%s", b)
-  }
-  if !strings.Contains(b, "| 1 | — | 0 in / 0 out (7 total) |") {
-    t.Errorf("breakdown vazio deveria render \"—\":\n%s", b)
-  }
-}
-
-func TestMigrateTelemetryLegacyFormat(t *testing.T) {
-  legacy := "# T\n\n| Data | Stack | Demanda | Bindings Testados | Tentativas | Tokens (In / Out / Total) | Status | Observação |\n" +
-    "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n" +
-    "| 2026-01-01 | Go | `d` | m | 1 | 1 in / 2 out (3 total) | **APPROVED** | ok |\n" +
-    "| linha | quebrada | com | colunas | demais | 1 | 2 | 3 | 4 | 5 |\n"
-  got, changed := migrateTelemetry(legacy)
-  if !changed {
-    t.Fatal("esperava migração")
-  }
-  lines := strings.Split(strings.TrimRight(got, "\n"), "\n")
-  if !strings.Contains(lines[2], "| Tentativas | Tokens (Por Etapa/Loop) | Tokens Totais | Status |") {
-    t.Errorf("cabeçalho não migrado: %s", lines[2])
-  }
-  for _, l := range lines[2:5] {
-    if n := strings.Count(l, "|"); n != 10 {
-      t.Errorf("linha deveria ter 9 colunas (10 pipes), tem %d: %s", n, l)
-    }
-  }
-  if !strings.Contains(lines[4], "| 1 | — | 1 in / 2 out (3 total) |") {
-    t.Errorf("linha de dados não migrada: %s", lines[4])
-  }
-  if lines[5] != "| linha | quebrada | com | colunas | demais | 1 | 2 | 3 | 4 | 5 |" {
-    t.Errorf("linha malformada não deveria ser tocada: %s", lines[5])
-  }
-  if again, changed := migrateTelemetry(got); changed || again != got {
-    t.Error("migração deve ser idempotente")
-  }
-}
-
-func TestAppendTelemetryMigratesExistingFile(t *testing.T) {
-  chdirTemp(t)
-  if err := os.Mkdir(".forge", 0755); err != nil {
-    t.Fatal(err)
-  }
-  legacy := "# T\n\n| Data | Stack | Demanda | Bindings Testados | Tentativas | Tokens (In / Out / Total) | Status | Observação |\n" +
-    "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n"
-  if err := os.WriteFile(filepath.Join(".forge", "TELEMETRY.md"), []byte(legacy), 0644); err != nil {
-    t.Fatal(err)
-  }
-  appendTelemetry("Go", "d.md", "m", 1, TokenStats{Total: 1}, []string{"F1: x"}, "APPROVED", "ok")
-  b := readString(t, filepath.Join(".forge", "TELEMETRY.md"))
-  if !strings.Contains(b, "Tokens (Por Etapa/Loop)") || !strings.Contains(b, "| F1: x |") || strings.Contains(b, "Tokens (In / Out / Total)") {
-    t.Errorf("arquivo antigo não migrado:\n%s", b)
-  }
 }
 
 func TestEnsureDocsDirsCreatesReferencesWithGitkeep(t *testing.T) {
@@ -1094,7 +981,7 @@ func TestEnsureForgeDirs(t *testing.T) {
   if err := ensureForgeDirs(); err != nil {
     t.Fatal(err)
   }
-  for _, sub := range []string{"agents", "config", "state"} {
+  for _, sub := range []string{"agents", "config", "state", "telemetry"} {
     if info, err := os.Stat(filepath.Join(".forge", sub)); err != nil || !info.IsDir() {
       t.Errorf(".forge/%s ausente: %v", sub, err)
     }
@@ -1108,5 +995,245 @@ func TestUpdateIndexStatusLegacyDemandsLink(t *testing.T) {
   updateIndexStatus(filepath.Join(docs, "demands", f), "APPROVED")
   if got := readString(t, index); !strings.Contains(got, "`APPROVED`") {
     t.Errorf("link legado não atualizado:\n%s", got)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Telemetria CSV relacional: runs.csv (1 linha por execução) e events.csv (1 linha por etapa)
+// ---------------------------------------------------------------------------
+
+func readCSV(t *testing.T, path string) [][]string {
+  t.Helper()
+  f, err := os.Open(path)
+  if err != nil {
+    t.Fatal(err)
+  }
+  defer f.Close()
+  rows, err := csv.NewReader(f).ReadAll() // também valida que todas as linhas têm o mesmo nº de colunas
+  if err != nil {
+    t.Fatalf("CSV inválido em %s: %v", path, err)
+  }
+  return rows
+}
+
+func TestRecordRunTelemetryCreatesCSVWithHeaderAndRow(t *testing.T) {
+  chdirTemp(t)
+  recordRunTelemetry("123", "Go", "docs/demands/a.md", 3, 2, TokenStats{Input: 10, Output: 5, Total: 15}, "APPROVED", "ok")
+  recordRunTelemetry("456", "Go", "", 3, 3, TokenStats{Input: 1, Output: 2, Total: 3}, "CIRCUIT_BREAKER_TRIPPED", "limite")
+
+  rows := readCSV(t, filepath.Join(".forge", "telemetry", "runs.csv"))
+  wantHeader := "RunID,Timestamp,Stack,DemandFile,MaxAttempts,TotalAttempts,TotalTokensIn,TotalTokensOut,TotalTokens,FinalStatus,Note"
+  if len(rows) != 3 {
+    t.Fatalf("esperava cabeçalho + 2 linhas, got %d: %v", len(rows), rows)
+  }
+  if got := strings.Join(rows[0], ","); got != wantHeader {
+    t.Errorf("cabeçalho = %q; want %q", got, wantHeader)
+  }
+  want := []string{"123", "", "Go", "docs/demands/a.md", "3", "2", "10", "5", "15", "APPROVED", "ok"}
+  for i, w := range want {
+    if i == 1 {
+      if _, err := time.Parse(time.RFC3339, rows[1][1]); err != nil {
+        t.Errorf("Timestamp não é RFC3339: %q", rows[1][1])
+      }
+      continue
+    }
+    if rows[1][i] != w {
+      t.Errorf("coluna %s = %q; want %q", rows[0][i], rows[1][i], w)
+    }
+  }
+  if rows[2][3] != "(via .forge/state/PLAN.md)" {
+    t.Errorf("demanda vazia deveria usar o marcador: %q", rows[2][3])
+  }
+}
+
+func TestRecordEventTelemetryCreatesCSVWithHeaderAndRow(t *testing.T) {
+  chdirTemp(t)
+  recordEventTelemetry("123", "F3", "BUILDER", "Gemini 3.8 Flash (High)", 2, TokenStats{Input: 7, Output: 3, Total: 10}, 12.3456)
+  recordEventTelemetry("123", "F5", "ARBITER", "m", 2, TokenStats{}, 0.5)
+
+  rows := readCSV(t, filepath.Join(".forge", "telemetry", "events.csv"))
+  wantHeader := "RunID,Timestamp,Stage,Agent,Model,Attempt,TokensIn,TokensOut,TotalTokens,DurationSeconds"
+  if len(rows) != 3 {
+    t.Fatalf("esperava cabeçalho + 2 linhas, got %d: %v", len(rows), rows)
+  }
+  if got := strings.Join(rows[0], ","); got != wantHeader {
+    t.Errorf("cabeçalho = %q; want %q", got, wantHeader)
+  }
+  r := rows[1]
+  for i, w := range map[int]string{0: "123", 2: "F3", 3: "BUILDER", 4: "Gemini 3.8 Flash (High)", 5: "2", 6: "7", 7: "3", 8: "10", 9: "12.346"} {
+    if r[i] != w {
+      t.Errorf("coluna %s = %q; want %q", rows[0][i], r[i], w)
+    }
+  }
+  if rows[2][9] != "0.500" {
+    t.Errorf("duração = %q; want 0.500", rows[2][9])
+  }
+}
+
+func TestTelemetryCSVEscapesSpecialCharsAndKeepsSingleHeader(t *testing.T) {
+  chdirTemp(t)
+  note := "nota com, vírgula, \"aspas\" e\nquebra"
+  for i := 0; i < 3; i++ {
+    recordRunTelemetry("1", "Go,Lang", "d.md", 3, 1, TokenStats{Total: 1}, "APPROVED", note)
+  }
+  rows := readCSV(t, filepath.Join(".forge", "telemetry", "runs.csv"))
+  if len(rows) != 4 {
+    t.Fatalf("esperava 1 cabeçalho + 3 linhas, got %d", len(rows))
+  }
+  if rows[1][2] != "Go,Lang" || rows[1][10] != note {
+    t.Errorf("round-trip CSV falhou: stack=%q note=%q", rows[1][2], rows[1][10])
+  }
+  for _, r := range rows[1:] {
+    if r[0] == "RunID" {
+      t.Error("cabeçalho duplicado")
+    }
+  }
+}
+
+func TestTelemetryCSVAppendsToExistingFileWithoutRewritingHeader(t *testing.T) {
+  chdirTemp(t)
+  if err := os.MkdirAll(filepath.Join(".forge", "telemetry"), 0755); err != nil {
+    t.Fatal(err)
+  }
+  path := filepath.Join(".forge", "telemetry", "events.csv")
+  if err := os.WriteFile(path, []byte(strings.Join(eventsCSVHeader, ",")+"\n"+"0,t,F1,A,m,1,1,1,2,0.1\n"), 0644); err != nil {
+    t.Fatal(err)
+  }
+  recordEventTelemetry("9", "F2", "SKEPTIC", "m", 1, TokenStats{Total: 1}, 1)
+  rows := readCSV(t, path)
+  if len(rows) != 3 || rows[2][0] != "9" {
+    t.Errorf("append em arquivo existente falhou: %v", rows)
+  }
+}
+
+func TestNewRunIDIsNumericAndUnique(t *testing.T) {
+  a := newRunID()
+  time.Sleep(time.Microsecond)
+  b := newRunID()
+  if !regexp.MustCompile(`^\d+$`).MatchString(a) || a == b {
+    t.Errorf("RunID inválido ou repetido: %q %q", a, b)
+  }
+}
+
+func TestRunAndEventShareRunIDForRelationalJoin(t *testing.T) {
+  chdirTemp(t)
+  id := newRunID()
+  recordEventTelemetry(id, "F1", "ARCHITECT", "m", 1, TokenStats{Total: 1}, 1)
+  recordRunTelemetry(id, "Go", "d.md", 3, 1, TokenStats{Total: 1}, "APPROVED", "ok")
+  runs := readCSV(t, filepath.Join(".forge", "telemetry", "runs.csv"))
+  events := readCSV(t, filepath.Join(".forge", "telemetry", "events.csv"))
+  if runs[1][0] != id || events[1][0] != id {
+    t.Errorf("RunID divergente: runs=%q events=%q", runs[1][0], events[1][0])
+  }
+}
+
+func TestUpdateDemandStatusHasNoBreakdownLine(t *testing.T) {
+  dir := t.TempDir()
+  p := registerDemandInDocs(dir, "Go", "Criar y", "F1:opus", "", nil)
+  updateDemandStatus(p, "APPROVED", 2, TokenStats{Input: 1, Output: 2, Total: 3})
+  got := readString(t, p)
+  for _, w := range []string{"- **Status:** `APPROVED`", "- **Tentativas:** `2`", "- **Tokens Totais:** `1 in / 2 out (3 total)`"} {
+    if !strings.Contains(got, w) {
+      t.Errorf("faltou %q:\n%s", w, got)
+    }
+  }
+  if strings.Contains(got, "Detalhamento") {
+    t.Errorf("linha de detalhamento não deveria existir:\n%s", got)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// -ref: arquivos de referência para enriquecer a demanda
+// ---------------------------------------------------------------------------
+
+func TestResolveReferences(t *testing.T) {
+  chdirTemp(t)
+  if err := os.MkdirAll(filepath.Join("docs", "references"), 0755); err != nil {
+    t.Fatal(err)
+  }
+  for _, f := range []string{"docs/references/auth.md", "notas.txt"} {
+    if err := os.WriteFile(f, []byte("x"), 0644); err != nil {
+      t.Fatal(err)
+    }
+  }
+  got, err := resolveReferences([]string{"auth.md", "./docs/references/auth.md", "notas.txt"}, "docs")
+  if err != nil {
+    t.Fatal(err)
+  }
+  if want := []string{"docs/references/auth.md", "notas.txt"}; strings.Join(got, "|") != strings.Join(want, "|") {
+    t.Errorf("got %v; want %v (nome curto em references/, duplicata removida, caminho direto)", got, want)
+  }
+  if got, err := resolveReferences(nil, "docs"); err != nil || len(got) != 0 {
+    t.Errorf("sem refs: got %v err=%v", got, err)
+  }
+}
+
+func TestResolveReferencesErrors(t *testing.T) {
+  chdirTemp(t)
+  if err := os.MkdirAll(filepath.Join("docs", "references"), 0755); err != nil {
+    t.Fatal(err)
+  }
+  for _, c := range []struct{ name, in string }{{"inexistente", "nao-existe.md"}, {"vazio", "  "}, {"diretorio", "docs/references"}} {
+    if _, err := resolveReferences([]string{c.in}, "docs"); err == nil {
+      t.Errorf("%s: esperava erro para %q", c.name, c.in)
+    }
+  }
+}
+
+func TestReferencesPrompt(t *testing.T) {
+  if referencesPrompt(nil) != "" {
+    t.Error("sem refs, o prompt não deve mudar")
+  }
+  got := referencesPrompt([]string{"docs/references/a.md", "b.md"})
+  if !strings.Contains(got, "@docs/references/a.md, @b.md.") {
+    t.Errorf("prompt sem as referências: %q", got)
+  }
+}
+
+func TestStringListFlagIsRepeatable(t *testing.T) {
+  var l stringList
+  _ = l.Set("a")
+  _ = l.Set("b")
+  if len(l) != 2 || l.String() != "a,b" {
+    t.Errorf("got %v", l)
+  }
+}
+
+func TestRegisterDemandListsReferences(t *testing.T) {
+  dir := t.TempDir()
+  refs := []string{"docs/references/auth.md", "openapi.yaml"}
+  p := registerDemandInDocs(dir, "Go", "Com refs", "m", "log-a.log", refs)
+  got := readString(t, p)
+  if !strings.Contains(got, "- **Referências:** `docs/references/auth.md`, `openapi.yaml`\n") {
+    t.Errorf("linha de referências ausente:\n%s", got)
+  }
+  if strings.Index(got, "- **Referências:**") > strings.Index(got, "## Descrição Original") {
+    t.Errorf("referências devem ficar no cabeçalho da demanda:\n%s", got)
+  }
+
+  // Nova execução no mesmo dia: só as referências inéditas são acrescentadas; idempotente.
+  registerDemandInDocs(dir, "Go", "Com refs", "m", "log-a.log", append(refs, "extra.md"))
+  registerDemandInDocs(dir, "Go", "Com refs", "m", "log-a.log", append(refs, "extra.md"))
+  got = readString(t, p)
+  if n := strings.Count(got, "`extra.md`"); n != 1 {
+    t.Errorf("extra.md deveria aparecer 1 vez, apareceu %d:\n%s", n, got)
+  }
+  if n := strings.Count(got, "`openapi.yaml`"); n != 1 {
+    t.Errorf("openapi.yaml duplicado:\n%s", got)
+  }
+}
+
+func TestRegisterDemandWithoutReferencesOmitsField(t *testing.T) {
+  p := registerDemandInDocs(t.TempDir(), "Go", "Sem refs", "m", "", nil)
+  if got := readString(t, p); strings.Contains(got, "Referências") {
+    t.Errorf("campo não deveria existir:\n%s", got)
+  }
+}
+
+func TestUpdateDemandStatusKeepsReferencesLine(t *testing.T) {
+  p := registerDemandInDocs(t.TempDir(), "Go", "Refs status", "m", "", []string{"a.md"})
+  updateDemandStatus(p, "APPROVED", 1, TokenStats{Total: 1})
+  if got := readString(t, p); !strings.Contains(got, "- **Referências:** `a.md`") || !strings.Contains(got, "`APPROVED`") {
+    t.Errorf("got:\n%s", got)
   }
 }

@@ -57,6 +57,15 @@ Cria `<docs>/PROJECT_CONTEXT.md`, `<docs>/demands/INDEX.md`, `<docs>/demands/`, 
 go run forgeloop.go -task "Implementar autenticação JWT com refresh token"
 ```
 
+Enriqueça a demanda com material de `<docs>/references/` usando `-ref` (repetível). Cada arquivo é validado antes de tudo e entregue ao ARCHITECT como `@caminho`, então é lido antes do planejamento:
+
+```bash
+go run forgeloop.go -task "Implementar autenticação JWT com refresh token" \
+  -ref auth-spec.md -ref docs/references/openapi.yaml
+```
+
+`-ref` aceita um caminho (relativo ao diretório atual ou absoluto) ou apenas o nome de um arquivo dentro de `<docs>/references/` (acompanha `-docs-dir` / `FORGE_DOCS_DIR`). Arquivo inexistente aborta antes de qualquer agente rodar. `-ref` só afeta a Etapa 1, então é ignorado (com aviso) ao iniciar com `-stage 2` ou superior.
+
 Comece de uma Etapa posterior com `-stage` (`-forge` continua funcionando como alias de compatibilidade):
 
 ```bash
@@ -87,7 +96,9 @@ Cada agente tem `FORGE_<AGENTE>_BIN`, `_MODEL` e `_ARGS` (flags extras do CLI, e
 ├── agents/                # contratos dos agentes (00_ONBOARDER.md ... 05_ARBITER.md)
 ├── config/                # models.env (versionado), project.env (ignorado pelo git)
 ├── state/                 # artefatos transitórios: PLAN, TEST_CASES, DECISION, ... (ignorado)
-└── TELEMETRY.md           # uma linha por execução: tokens por etapa/loop + total consolidado
+└── telemetry/             # métricas em CSV (cabeçalho criado no primeiro uso, depois só append)
+    ├── runs.csv           # uma linha por execução: tentativas, tokens in/out/total, status final
+    └── events.csv         # uma linha por etapa/agente: tokens, duração, tentativa (junta com runs.csv via RunID)
 ```
 
 Os logs trazem o prompt e a resposta completa de cada agente, a saída integral de testes/linters, os relatórios de revisão/segurança/decisão, durações, contagem de tokens e o código de saída final.

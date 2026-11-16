@@ -37,9 +37,9 @@ go run forgeloop.go -init -force-skills   # reinstala/atualiza todas as skills
 O `-init`:
 
 1. verifica no `$PATH` os binários configurados (`claude`, `agy`, `npx`, `git`) e mostra `[OK]` ou `[AUSENTE]`;
-2. coleta as skills únicas das variáveis `FORGE_*_SKILL` (`.forge/models.env` / ambiente);
+2. coleta as skills únicas das variáveis `FORGE_*_SKILL` (`.forge/config/models.env` / ambiente);
 3. instala as ausentes com `npx skills add <skill> -g -y` (todas, com `-force-skills`). Uma skill conta como presente se existir uma pasta com o nome dela em `skills/`, `.agents/skills/`, `~/.claude/skills/` ou `~/.antigravity/skills/`, ou se o `skills-lock.json` a listar como origem;
-4. cria `.forge/`, `<docs>/demands/` e `<docs>/logs/` e grava o próprio log em `<docs>/logs/`.
+4. cria `.forge/{agents,config,state}/`, `<docs>/demands/`, `<docs>/logs/` e `<docs>/references/` e grava o próprio log em `<docs>/logs/`.
 
 Termina com código `1` se faltar algum binário ou se a instalação de alguma skill falhar. Toda execução normal também faz um *pre-flight* rápido e avisa (sem bloquear) se alguma skill configurada não estiver instalada.
 
@@ -49,7 +49,7 @@ Termina com código `1` se faltar algum binário ou se a instalação de alguma 
 go run forgeloop.go -setup
 ```
 
-Cria `<docs>/PROJECT_CONTEXT.md`, `<docs>/DEMANDS_INDEX.md`, `<docs>/demands/` e `<docs>/logs/`.
+Cria `<docs>/PROJECT_CONTEXT.md`, `<docs>/demands/INDEX.md`, `<docs>/demands/`, `<docs>/logs/` e `<docs>/references/`.
 
 ### 3. Iniciar nova demanda — `-task` (Etapas 1 a 5)
 
@@ -60,13 +60,13 @@ go run forgeloop.go -task "Implementar autenticação JWT com refresh token"
 Comece de uma Etapa posterior com `-stage` (`-forge` continua funcionando como alias de compatibilidade):
 
 ```bash
-go run forgeloop.go -stage 2    # a partir de TEMPER (reaproveita PLAN.md / testes existentes)
+go run forgeloop.go -stage 2    # a partir de TEMPER (reaproveita .forge/state/PLAN.md / testes existentes)
 go run forgeloop.go -stage 3    # a partir de STRIKE
 ```
 
 ### 4. Testar combinações de modelos
 
-Edite `.forge/models.env` ou sobrescreva via variáveis de ambiente:
+Edite `.forge/config/models.env` ou sobrescreva via variáveis de ambiente:
 
 ```bash
 FORGE_BUILDER_MODEL="GPT-OSS 120B (Medium)" go run forgeloop.go -task "Adicionar paginação por cursor"
@@ -79,10 +79,15 @@ Cada agente tem `FORGE_<AGENTE>_BIN`, `_MODEL` e `_ARGS` (flags extras do CLI, e
 ```text
 <docs>/
 ├── PROJECT_CONTEXT.md     # contexto do projeto (Etapa 0)
-├── DEMANDS_INDEX.md       # | Data | Stack | Demanda | Arquivo | Status |
-├── demands/               # um arquivo por demanda, com link para o log da execução
-└── logs/                  # um log completo por execução: AAAA-MM-DD_HHMMSS-<slug>.log
-.forge/                    # prompts dos agentes, models.env, artefatos transitórios (PLAN, DECISION, ...)
+├── demands/               # um arquivo por demanda, ligado ao log da execução
+│   └── INDEX.md           # | Data | Stack | Demanda | Arquivo | Status |
+├── logs/                  # um log completo por execução: AAAA-MM-DD_HHMMSS-<slug>.log
+└── references/            # material de referência (criada por -init / -setup)
+.forge/
+├── agents/                # contratos dos agentes (00_ONBOARDER.md ... 05_ARBITER.md)
+├── config/                # models.env (versionado), project.env (ignorado pelo git)
+├── state/                 # artefatos transitórios: PLAN, TEST_CASES, DECISION, ... (ignorado)
+└── TELEMETRY.md           # uma linha por execução: tokens por etapa/loop + total consolidado
 ```
 
 Os logs trazem o prompt e a resposta completa de cada agente, a saída integral de testes/linters, os relatórios de revisão/segurança/decisão, durações, contagem de tokens e o código de saída final.

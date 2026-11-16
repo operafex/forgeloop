@@ -1,11 +1,6 @@
 # Artefatos transitórios de cada execução da Forge
-.forge/PLAN.md
-.forge/TEST_CASES.md
-.forge/SPEC_REVIEW.md
-.forge/VERIFY_REPORT.md
-.forge/SECURITY_REPORT.md
-.forge/DECISION.md
-.forge/project.env
+.forge/state/
+.forge/config/project.env
 
 #pastas de configuração
 .agents/

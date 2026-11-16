@@ -12,7 +12,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// slugify — Task 1 (ver .forge/PLAN.md / .forge/TEST_CASES.md: S-*)
+// slugify — Task 1 (ver .forge/state/PLAN.md / .forge/state/TEST_CASES.md: S-*)
 // ---------------------------------------------------------------------------
 
 func TestSlugify(t *testing.T) {
@@ -275,17 +275,17 @@ func TestExtractOrEstimateTokensThousandsSeparator(t *testing.T) {
 const indexHeader = "# Índice\n\n| Data | Stack | Demanda | Arquivo | Status |\n| :--- | :--- | :--- | :--- | :--- |\n"
 
 func indexRow(file, status string) string {
-  return "| 2026-01-01 | Go | d | [`" + file + "`](demands/" + file + ") | `" + status + "` |\n"
+  return "| 2026-01-01 | Go | d | [`" + file + "`](" + file + ") | `" + status + "` |\n"
 }
 
-// setupIndex cria <tmp>/docs/{demands,logs} e DEMANDS_INDEX.md com o conteúdo dado.
+// setupIndex cria <tmp>/docs/{demands,logs,references} e demands/INDEX.md com o conteúdo dado.
 func setupIndex(t *testing.T, content string) (docsDir, indexPath string) {
   t.Helper()
   docsDir = filepath.Join(t.TempDir(), "docs")
   if err := ensureDocsDirs(docsDir); err != nil {
     t.Fatal(err)
   }
-  indexPath = filepath.Join(docsDir, "DEMANDS_INDEX.md")
+  indexPath = filepath.Join(docsDir, "demands", "INDEX.md")
   if err := os.WriteFile(indexPath, []byte(content), 0644); err != nil {
     t.Fatal(err)
   }
@@ -377,13 +377,13 @@ func TestUpdateIndexStatusReplacesOnlyFirstStatusToken(t *testing.T) {
 }
 
 func TestUpdateIndexStatusMissingIndexIsNoop(t *testing.T) {
-  // U-X1: sem DEMANDS_INDEX.md → não cria arquivo nem entra em pânico.
+  // U-X1: sem demands/INDEX.md → não cria arquivo nem entra em pânico.
   docs := filepath.Join(t.TempDir(), "docs")
   if err := ensureDocsDirs(docs); err != nil {
     t.Fatal(err)
   }
   updateIndexStatus(filepath.Join(docs, "demands", "x.md"), "APPROVED")
-  if _, err := os.Stat(filepath.Join(docs, "DEMANDS_INDEX.md")); !os.IsNotExist(err) {
+  if _, err := os.Stat(filepath.Join(docs, "demands", "INDEX.md")); !os.IsNotExist(err) {
     t.Errorf("índice não deveria ser criado: %v", err)
   }
 }
@@ -512,7 +512,7 @@ func TestRegisterDemandLinksLog(t *testing.T) {
     t.Errorf("estrutura da demanda alterada:\n%s", b)
   }
 
-  idx, _ := os.ReadFile(filepath.Join(dir, "DEMANDS_INDEX.md"))
+  idx, _ := os.ReadFile(filepath.Join(dir, "demands", "INDEX.md"))
   lines := strings.Split(strings.TrimSpace(string(idx)), "\n")
   if !strings.HasPrefix(lines[2], "| Data | Stack | Demanda | Arquivo | Status |") {
     t.Errorf("cabeçalho do índice alterado: %q", lines[2])
@@ -527,7 +527,7 @@ func TestRegisterDemandLinksLog(t *testing.T) {
 
   // Status da demanda continua sincronizado com o índice.
   updateDemandStatus(demandPath, "APPROVED", 1, TokenStats{Total: 1}, nil)
-  idx, _ = os.ReadFile(filepath.Join(dir, "DEMANDS_INDEX.md"))
+  idx, _ = os.ReadFile(filepath.Join(dir, "demands", "INDEX.md"))
   if !strings.Contains(string(idx), "`APPROVED`") {
     t.Errorf("índice não sincronizado:\n%s", idx)
   }
@@ -567,7 +567,7 @@ func TestEnsureDocsStructureSection(t *testing.T) {
   if strings.Count(got, docsStructureMarker) != 1 {
     t.Errorf("seção deveria aparecer uma vez:\n%s", got)
   }
-  for _, want := range []string{"docs/demands/", "docs/logs/", "DEMANDS_INDEX.md", "Log de Execução"} {
+  for _, want := range []string{"docs/demands/", "docs/logs/", "docs/references/", "demands/INDEX.md", "Log de Execução"} {
     if !strings.Contains(got, want) {
       t.Errorf("seção sem %q:\n%s", want, got)
     }
@@ -963,7 +963,8 @@ func TestAppendTelemetryEscapesPipes(t *testing.T) {
   }
   t.Cleanup(func() { _ = os.Chdir(orig) })
 
-  appendTelemetry("go|stack", "demands/a|b.md", "claude|gemini\nx", 2, TokenStats{Input: 1, Output: 2, Total: 3}, "APPROVED", "nota com | pipe\r\ne quebra")
+  breakdown := []string{"F1(ARCHITECT): 1 in / 1 out (2 total)", "F3#1(BUILDER|x): 2 in / 3 out (5 total)"}
+  appendTelemetry("go|stack", "demands/a|b.md", "claude|gemini\nx", 2, TokenStats{Input: 1, Output: 2, Total: 3}, breakdown, "APPROVED", "nota com | pipe\r\ne quebra")
 
   b, err := os.ReadFile(filepath.Join(".forge", "TELEMETRY.md"))
   if err != nil {
@@ -982,10 +983,11 @@ func TestAppendTelemetryEscapesPipes(t *testing.T) {
   if row == "" || header == "" {
     t.Fatalf("cabeçalho/linha ausentes:\n%s", b)
   }
-  if got, want := strings.Count(row, "|"), strings.Count(header, "|"); got != want || want != 9 {
-    t.Errorf("pipes row=%d header=%d; want 9 (8 colunas)\nrow: %s", got, want, row)
+  if got, want := strings.Count(row, "|"), strings.Count(header, "|"); got != want || want != 10 {
+    t.Errorf("pipes row=%d header=%d; want 10 (9 colunas)\nrow: %s", got, want, row)
   }
-  for _, want := range []string{"go;stack", "a;b.md", "claude;gemini x", "nota com ; pipe  e quebra"} {
+  for _, want := range []string{"go;stack", "a;b.md", "claude;gemini x", "nota com ; pipe  e quebra",
+    "F1(ARCHITECT): 1 in / 1 out (2 total)<br>F3#1(BUILDER;x): 2 in / 3 out (5 total) | 1 in / 2 out (3 total)"} {
     if !strings.Contains(row, want) {
       t.Errorf("linha sem %q: %s", want, row)
     }
@@ -995,5 +997,116 @@ func TestAppendTelemetryEscapesPipes(t *testing.T) {
 func TestSanitizeTableCell(t *testing.T) {
   if got := sanitizeTableCell("a|b\r\nc\nd"); got != "a;b  c d" {
     t.Errorf("got %q", got)
+  }
+}
+
+func chdirTemp(t *testing.T) string {
+  t.Helper()
+  orig, err := os.Getwd()
+  if err != nil {
+    t.Fatal(err)
+  }
+  dir := t.TempDir()
+  if err := os.Chdir(dir); err != nil {
+    t.Fatal(err)
+  }
+  t.Cleanup(func() { _ = os.Chdir(orig) })
+  return dir
+}
+
+func TestAppendTelemetryColumnOrderAndEmptyBreakdown(t *testing.T) {
+  chdirTemp(t)
+  if err := os.Mkdir(".forge", 0755); err != nil {
+    t.Fatal(err)
+  }
+  appendTelemetry("Go", "", "m", 1, TokenStats{Total: 7}, nil, "APPROVED", "ok")
+  b := readString(t, filepath.Join(".forge", "TELEMETRY.md"))
+  stage := strings.Index(b, "Tokens (Por Etapa/Loop)")
+  total := strings.Index(b, "Tokens Totais")
+  if stage < 0 || total < 0 || stage > total {
+    t.Errorf("coluna por etapa deve vir antes de Tokens Totais:\n%s", b)
+  }
+  if !strings.Contains(b, "| 1 | — | 0 in / 0 out (7 total) |") {
+    t.Errorf("breakdown vazio deveria render \"—\":\n%s", b)
+  }
+}
+
+func TestMigrateTelemetryLegacyFormat(t *testing.T) {
+  legacy := "# T\n\n| Data | Stack | Demanda | Bindings Testados | Tentativas | Tokens (In / Out / Total) | Status | Observação |\n" +
+    "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n" +
+    "| 2026-01-01 | Go | `d` | m | 1 | 1 in / 2 out (3 total) | **APPROVED** | ok |\n" +
+    "| linha | quebrada | com | colunas | demais | 1 | 2 | 3 | 4 | 5 |\n"
+  got, changed := migrateTelemetry(legacy)
+  if !changed {
+    t.Fatal("esperava migração")
+  }
+  lines := strings.Split(strings.TrimRight(got, "\n"), "\n")
+  if !strings.Contains(lines[2], "| Tentativas | Tokens (Por Etapa/Loop) | Tokens Totais | Status |") {
+    t.Errorf("cabeçalho não migrado: %s", lines[2])
+  }
+  for _, l := range lines[2:5] {
+    if n := strings.Count(l, "|"); n != 10 {
+      t.Errorf("linha deveria ter 9 colunas (10 pipes), tem %d: %s", n, l)
+    }
+  }
+  if !strings.Contains(lines[4], "| 1 | — | 1 in / 2 out (3 total) |") {
+    t.Errorf("linha de dados não migrada: %s", lines[4])
+  }
+  if lines[5] != "| linha | quebrada | com | colunas | demais | 1 | 2 | 3 | 4 | 5 |" {
+    t.Errorf("linha malformada não deveria ser tocada: %s", lines[5])
+  }
+  if again, changed := migrateTelemetry(got); changed || again != got {
+    t.Error("migração deve ser idempotente")
+  }
+}
+
+func TestAppendTelemetryMigratesExistingFile(t *testing.T) {
+  chdirTemp(t)
+  if err := os.Mkdir(".forge", 0755); err != nil {
+    t.Fatal(err)
+  }
+  legacy := "# T\n\n| Data | Stack | Demanda | Bindings Testados | Tentativas | Tokens (In / Out / Total) | Status | Observação |\n" +
+    "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n"
+  if err := os.WriteFile(filepath.Join(".forge", "TELEMETRY.md"), []byte(legacy), 0644); err != nil {
+    t.Fatal(err)
+  }
+  appendTelemetry("Go", "d.md", "m", 1, TokenStats{Total: 1}, []string{"F1: x"}, "APPROVED", "ok")
+  b := readString(t, filepath.Join(".forge", "TELEMETRY.md"))
+  if !strings.Contains(b, "Tokens (Por Etapa/Loop)") || !strings.Contains(b, "| F1: x |") || strings.Contains(b, "Tokens (In / Out / Total)") {
+    t.Errorf("arquivo antigo não migrado:\n%s", b)
+  }
+}
+
+func TestEnsureDocsDirsCreatesReferencesWithGitkeep(t *testing.T) {
+  docs := filepath.Join(t.TempDir(), "docs")
+  for i := 0; i < 2; i++ { // idempotente
+    if err := ensureDocsDirs(docs); err != nil {
+      t.Fatal(err)
+    }
+  }
+  if info, err := os.Stat(filepath.Join(docs, "references", ".gitkeep")); err != nil || info.IsDir() {
+    t.Errorf("docs/references/.gitkeep ausente: %v", err)
+  }
+}
+
+func TestEnsureForgeDirs(t *testing.T) {
+  chdirTemp(t)
+  if err := ensureForgeDirs(); err != nil {
+    t.Fatal(err)
+  }
+  for _, sub := range []string{"agents", "config", "state"} {
+    if info, err := os.Stat(filepath.Join(".forge", sub)); err != nil || !info.IsDir() {
+      t.Errorf(".forge/%s ausente: %v", sub, err)
+    }
+  }
+}
+
+func TestUpdateIndexStatusLegacyDemandsLink(t *testing.T) {
+  f := "2026-01-01-x.md"
+  row := "| d | [`" + f + "`](demands/" + f + ") | `IN_PROGRESS` |\n"
+  docs, index := setupIndex(t, indexHeader+row)
+  updateIndexStatus(filepath.Join(docs, "demands", f), "APPROVED")
+  if got := readString(t, index); !strings.Contains(got, "`APPROVED`") {
+    t.Errorf("link legado não atualizado:\n%s", got)
   }
 }

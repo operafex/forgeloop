@@ -61,8 +61,8 @@ func (t TokenStats) Format() string {
 }
 
 func main() {
-  loadEnvFile(".forge/models.env")
-  loadEnvFile(".forge/project.env")
+  loadEnvFile(".forge/config/models.env")
+  loadEnvFile(".forge/config/project.env")
 
   setupMode := flag.Bool("setup", false, "Etapa 0 (Discovery): analisa projeto existente e mapeia documentação")
   taskFlag := flag.String("task", "", "Descrição da nova demanda (salva automaticamente em /docs/demands/)")
@@ -74,7 +74,7 @@ func main() {
   docsDirFlag := flag.String("docs-dir", getEnv("FORGE_DOCS_DIR", getEnv("FORGE_DEFAULT_DOCS_DIR", "docs")), "Diretório de documentação")
   jsonMetrics := flag.Bool("json-metrics", true, "Extrai contagem exata de tokens via --output-format json quando suportado")
 
-  // Bindings desacoplados: troque via .forge/models.env ou flags CLI
+  // Bindings desacoplados: troque via .forge/config/models.env ou flags CLI
   onbBin := flag.String("onboarder-bin", getEnv("FORGE_ONBOARDER_BIN", "claude"), "Binário da Etapa 0 (ONBOARDER)")
   onbModel := flag.String("onboarder-model", getEnv("FORGE_ONBOARDER_MODEL", "opus"), "Modelo da Etapa 0 (ONBOARDER)")
   onbArgs := flag.String("onboarder-args", getEnv("FORGE_ONBOARDER_ARGS", ""), "Argumentos extras do CLI da Etapa 0 (ONBOARDER)")
@@ -111,8 +111,8 @@ func main() {
     fatal("%v", stageErr)
   }
 
-  if err := os.MkdirAll(".forge", 0755); err != nil {
-    fatal("Erro ao criar diretório .forge: %v", err)
+  if err := ensureForgeDirs(); err != nil {
+    fatal("Erro ao criar estrutura .forge/: %v", err)
   }
 
   onboarder := AgentBinding{Forge: "ETAPA 0", Stage: "DISCOVERY", Alias: "ONBOARDER", Bin: *onbBin, Model: *onbModel, Args: *onbArgs}
@@ -198,10 +198,10 @@ func main() {
   if startStage <= 1 {
     printBanner("ETAPA 1: BLUEPRINT — ARCHITECT", fmt.Sprintf("Skill: %s | Modelo: %s (%s)", architect.Skill, architect.Model, architect.Bin))
     prompt := fmt.Sprintf(
-      "Siga estritamente as instruções de @.forge/01_ARCHITECT.md aplicando a skill %s. "+
+      "Siga estritamente as instruções de @.forge/agents/01_ARCHITECT.md aplicando a skill %s. "+
         "Diretório de documentação do projeto: %s/ (leia %s/PROJECT_CONTEXT.md se existir). "+
         "Stack selecionada: %s. Demanda: %s (arquivo de registro: %s). "+
-        "Gere .forge/PLAN.md (dividido em Tasks atômicas), .forge/TEST_CASES.md, anexe o plano técnico em %s e crie os testes automatizados em estado RED.",
+        "Gere .forge/state/PLAN.md (dividido em Tasks atômicas), .forge/state/TEST_CASES.md, anexe o plano técnico em %s e crie os testes automatizados em estado RED.",
       architect.Skill, docsDir, docsDir, stack.Name, task, demandFile, demandFile,
     )
     stats, err := runAgent(architect, prompt, *jsonMetrics)
@@ -219,9 +219,9 @@ func main() {
   if startStage <= 2 {
     printBanner("ETAPA 2: TEMPER — SKEPTIC", fmt.Sprintf("Skill: %s | Modelo: %s (%s)", skeptic.Skill, skeptic.Model, skeptic.Bin))
     prompt := fmt.Sprintf(
-      "Siga estritamente as instruções de @.forge/02_SKEPTIC.md aplicando a skill %s. "+
-        "Diretório de documentação: %s/. Audite @.forge/PLAN.md, @.forge/TEST_CASES.md e os arquivos de teste recém-criados. "+
-        "Grave seu veredito em .forge/SPEC_REVIEW.md.",
+      "Siga estritamente as instruções de @.forge/agents/02_SKEPTIC.md aplicando a skill %s. "+
+        "Diretório de documentação: %s/. Audite @.forge/state/PLAN.md, @.forge/state/TEST_CASES.md e os arquivos de teste recém-criados. "+
+        "Grave seu veredito em .forge/state/SPEC_REVIEW.md.",
       skeptic.Skill, docsDir,
     )
 
@@ -233,16 +233,16 @@ func main() {
     }
     reportTokens(skeptic, stats)
 
-    reviewContent, err := readFile(".forge/SPEC_REVIEW.md")
+    reviewContent, err := readFile(".forge/state/SPEC_REVIEW.md")
     if err != nil {
-      fatal("Não foi possível ler .forge/SPEC_REVIEW.md: %v", err)
+      fatal("Não foi possível ler .forge/state/SPEC_REVIEW.md: %v", err)
     }
-    logBlock(".forge/SPEC_REVIEW.md", reviewContent)
+    logBlock(".forge/state/SPEC_REVIEW.md", reviewContent)
 
     if !strings.Contains(reviewContent, "SPEC_STATUS: APPROVED") {
       updateDemandStatus(demandFile, "SPEC_REVISION_REQUIRED", 0, totalTokens, breakdown)
-      appendTelemetry(stack.Name, demandFile, modelsSummary, 0, totalTokens, "SPEC_REVISION_REQUIRED", "Bloqueado pelo SKEPTIC na Etapa 2")
-      printBanner("BLOQUEIO NA ETAPA 2 (TEMPER)", "O SKEPTIC exigiu ajustes na especificação. Consulte .forge/SPEC_REVIEW.md e rode novamente a Etapa 1.")
+      appendTelemetry(stack.Name, demandFile, modelsSummary, 0, totalTokens, breakdown, "SPEC_REVISION_REQUIRED", "Bloqueado pelo SKEPTIC na Etapa 2")
+      printBanner("BLOQUEIO NA ETAPA 2 (TEMPER)", "O SKEPTIC exigiu ajustes na especificação. Consulte .forge/state/SPEC_REVIEW.md e rode novamente a Etapa 1.")
       finish(2)
     }
     fmt.Println("\n[OK] Especificação aprovada (SPEC_STATUS: APPROVED). Entrando no ciclo Strike -> Quench -> Assay...")
@@ -257,19 +257,19 @@ func main() {
       fmt.Sprintf("Contexto Higienizado | Modelo: %s (%s)", builder.Model, builder.Bin))
 
     execPrompt := fmt.Sprintf(
-      "Siga estritamente as instruções de @.forge/03_BUILDER.md. Diretório de docs: %s/. "+
-        "Leia @.forge/PLAN.md e @.forge/TEST_CASES.md e implemente as Tasks no código de produção.",
+      "Siga estritamente as instruções de @.forge/agents/03_BUILDER.md. Diretório de docs: %s/. "+
+        "Leia @.forge/state/PLAN.md e @.forge/state/TEST_CASES.md e implemente as Tasks no código de produção.",
       docsDir,
     )
     if attempt > 1 {
-      execPrompt += " ATENÇÃO: Rodada de correção. Leia @.forge/DECISION.md, @.forge/VERIFY_REPORT.md e @.forge/SECURITY_REPORT.md e corrija todos os apontamentos."
+      execPrompt += " ATENÇÃO: Rodada de correção. Leia @.forge/state/DECISION.md, @.forge/state/VERIFY_REPORT.md e @.forge/state/SECURITY_REPORT.md e corrija todos os apontamentos."
     }
 
     bStats, err := runAgent(builder, execPrompt, *jsonMetrics)
     totalTokens.Add(bStats)
     breakdown = append(breakdown, fmt.Sprintf("F3#%d(%s): %s", attempt, builder.Alias, bStats.Format()))
     if err != nil {
-      fatal("Falha na Etapa 3 (BUILDER): %v (verifique FORGE_BUILDER_MODEL/FORGE_BUILDER_BIN em .forge/models.env)", err)
+      fatal("Falha na Etapa 3 (BUILDER): %v (verifique FORGE_BUILDER_MODEL/FORGE_BUILDER_BIN em .forge/config/models.env)", err)
     }
     reportTokens(builder, bStats)
 
@@ -283,11 +283,11 @@ func main() {
       fmt.Sprintf("Skill: %s | Modelo: %s", sentinel.Skill, sentinel.Model))
 
     secPrompt := fmt.Sprintf(
-      "Siga estritamente as instruções de @.forge/04_SENTINEL.md aplicando a skill %s. "+
-        "Audite o git diff atual e grave o relatório em .forge/SECURITY_REPORT.md.",
+      "Siga estritamente as instruções de @.forge/agents/04_SENTINEL.md aplicando a skill %s. "+
+        "Audite o git diff atual e grave o relatório em .forge/state/SECURITY_REPORT.md.",
       sentinel.Skill,
     )
-    secReportPath := ".forge/SECURITY_REPORT.md"
+    secReportPath := ".forge/state/SECURITY_REPORT.md"
     var secModBefore time.Time
     if fi, statErr := os.Stat(secReportPath); statErr == nil {
       secModBefore = fi.ModTime()
@@ -300,7 +300,7 @@ func main() {
       logEvent("AVISO: SENTINEL retornou erro de processo: %v", err)
     }
     if secContent, readErr := readFile(secReportPath); readErr == nil {
-      logBlock(".forge/SECURITY_REPORT.md (tentativa "+strconv.Itoa(attempt)+")", secContent)
+      logBlock(".forge/state/SECURITY_REPORT.md (tentativa "+strconv.Itoa(attempt)+")", secContent)
     }
     if fi, statErr := os.Stat(secReportPath); statErr != nil {
       fmt.Printf("[AVISO] SENTINEL não gerou %s. A auditoria de segurança NÃO foi registrada (verifique permissões em FORGE_SENTINEL_ARGS).\n", secReportPath)
@@ -314,10 +314,10 @@ func main() {
       fmt.Sprintf("Modelo: %s (%s)", arbiter.Model, arbiter.Bin))
 
     arbPrompt := fmt.Sprintf(
-      "Siga estritamente as instruções de @.forge/05_ARBITER.md. "+
+      "Siga estritamente as instruções de @.forge/agents/05_ARBITER.md. "+
         "Esta é a tentativa ATTEMPT: %d de %d. "+
-        "Analise @.forge/PLAN.md, @.forge/TEST_CASES.md, @.forge/VERIFY_REPORT.md, @.forge/SECURITY_REPORT.md e execute git diff. "+
-        "Grave seu veredito em .forge/DECISION.md.",
+        "Analise @.forge/state/PLAN.md, @.forge/state/TEST_CASES.md, @.forge/state/VERIFY_REPORT.md, @.forge/state/SECURITY_REPORT.md e execute git diff. "+
+        "Grave seu veredito em .forge/state/DECISION.md.",
       attempt, *maxAttempts,
     )
 
@@ -331,30 +331,30 @@ func main() {
     fmt.Printf("[TOKENS ACUMULADOS NA FORJA] %s\n", totalTokens.Format())
     logEvent("TOKENS ACUMULADOS NA FORJA: %s", totalTokens.Format())
 
-    decisionContent, err := readFile(".forge/DECISION.md")
+    decisionContent, err := readFile(".forge/state/DECISION.md")
     if err != nil {
-      fatal("Não foi possível ler .forge/DECISION.md: %v", err)
+      fatal("Não foi possível ler .forge/state/DECISION.md: %v", err)
     }
-    logBlock(".forge/DECISION.md (tentativa "+strconv.Itoa(attempt)+")", decisionContent)
+    logBlock(".forge/state/DECISION.md (tentativa "+strconv.Itoa(attempt)+")", decisionContent)
 
     switch {
     case strings.Contains(decisionContent, "DECISION: APPROVE_MERGE"):
       updateDemandStatus(demandFile, "APPROVED", attempt, totalTokens, breakdown)
-      appendTelemetry(stack.Name, demandFile, modelsSummary, attempt, totalTokens, "APPROVED", "Testes, AppSec e Diff-Judge aprovados")
+      appendTelemetry(stack.Name, demandFile, modelsSummary, attempt, totalTokens, breakdown, "APPROVED", "Testes, AppSec e Diff-Judge aprovados")
       printBanner("A FORJA CONCLUÍDA — APPROVE_MERGE",
         fmt.Sprintf("Aprovado em %d tentativa(s) | Gasto Total: %s", attempt, totalTokens.Format()))
       finish(0)
 
     case strings.Contains(decisionContent, "DECISION: AMEND_TEST"):
       updateDemandStatus(demandFile, "AMEND_TEST", attempt, totalTokens, breakdown)
-      appendTelemetry(stack.Name, demandFile, modelsSummary, attempt, totalTokens, "AMEND_TEST", "Erro detectado no teste da Etapa 1")
-      printBanner("INTERVENÇÃO NECESSÁRIA — AMEND_TEST", "O ARBITER identificou bug em um teste da Etapa 1. Revise .forge/DECISION.md.")
+      appendTelemetry(stack.Name, demandFile, modelsSummary, attempt, totalTokens, breakdown, "AMEND_TEST", "Erro detectado no teste da Etapa 1")
+      printBanner("INTERVENÇÃO NECESSÁRIA — AMEND_TEST", "O ARBITER identificou bug em um teste da Etapa 1. Revise .forge/state/DECISION.md.")
       finish(3)
 
     case strings.Contains(decisionContent, "DECISION: ESCALATE_ARCHITECT"):
       updateDemandStatus(demandFile, "ESCALATE_ARCHITECT", attempt, totalTokens, breakdown)
-      appendTelemetry(stack.Name, demandFile, modelsSummary, attempt, totalTokens, "ESCALATE_ARCHITECT", "Escalonado para revisão arquitetural")
-      printBanner("CIRCUIT BREAKER — ESCALATE_ARCHITECT", "Falha estrutural ou limite atingido. Consulte .forge/DECISION.md.")
+      appendTelemetry(stack.Name, demandFile, modelsSummary, attempt, totalTokens, breakdown, "ESCALATE_ARCHITECT", "Escalonado para revisão arquitetural")
+      printBanner("CIRCUIT BREAKER — ESCALATE_ARCHITECT", "Falha estrutural ou limite atingido. Consulte .forge/state/DECISION.md.")
       finish(4)
 
     case strings.Contains(decisionContent, "DECISION: RETRY_EXECUTION"):
@@ -367,13 +367,13 @@ func main() {
 
     default:
       updateDemandStatus(demandFile, "UNKNOWN_VERDICT", attempt, totalTokens, breakdown)
-      appendTelemetry(stack.Name, demandFile, modelsSummary, attempt, totalTokens, "UNKNOWN_VERDICT", "Veredito não reconhecido")
-      fatal("Veredito não reconhecido em .forge/DECISION.md.")
+      appendTelemetry(stack.Name, demandFile, modelsSummary, attempt, totalTokens, breakdown, "UNKNOWN_VERDICT", "Veredito não reconhecido")
+      fatal("Veredito não reconhecido em .forge/state/DECISION.md.")
     }
   }
 
   updateDemandStatus(demandFile, "CIRCUIT_BREAKER_TRIPPED", *maxAttempts, totalTokens, breakdown)
-  appendTelemetry(stack.Name, demandFile, modelsSummary, *maxAttempts, totalTokens, "CIRCUIT_BREAKER_TRIPPED", "Limite máximo de tentativas excedido")
+  appendTelemetry(stack.Name, demandFile, modelsSummary, *maxAttempts, totalTokens, breakdown, "CIRCUIT_BREAKER_TRIPPED", "Limite máximo de tentativas excedido")
   printBanner("CIRCUIT BREAKER ACIONADO",
     fmt.Sprintf("Limite de %d tentativas atingido | Gasto Total: %s", *maxAttempts, totalTokens.Format()))
   finish(1)
@@ -395,6 +395,9 @@ func runProjectSetup(reader *bufio.Reader, onboarder AgentBinding, defaultDocs s
     targetDocsDir = "docs"
   }
 
+  if err := ensureForgeDirs(); err != nil {
+    fatal("Erro ao criar estrutura .forge/: %v", err)
+  }
   if err := ensureDocsDirs(targetDocsDir); err != nil {
     fatal("Erro ao criar estrutura de pastas em %s: %v", targetDocsDir, err)
   }
@@ -403,7 +406,7 @@ func runProjectSetup(reader *bufio.Reader, onboarder AgentBinding, defaultDocs s
     "", "", 0, 0, targetDocsDir))
 
   projectEnv := fmt.Sprintf("FORGE_DOCS_DIR=%s\nFORGE_EXISTING_DOCS=%s\n", targetDocsDir, existingDocs)
-  _ = os.WriteFile(".forge/project.env", []byte(projectEnv), 0644)
+  _ = os.WriteFile(".forge/config/project.env", []byte(projectEnv), 0644)
 
   sourceHint := existingDocs
   if sourceHint == "" {
@@ -411,10 +414,10 @@ func runProjectSetup(reader *bufio.Reader, onboarder AgentBinding, defaultDocs s
   }
 
   prompt := fmt.Sprintf(
-    "Siga estritamente as instruções de @.forge/00_ONBOARDER.md. "+
+    "Siga estritamente as instruções de @.forge/agents/00_ONBOARDER.md. "+
       "Documentação existente informada pelo usuário: '%s'. "+
       "Diretório oficial de saída para documentação: '%s/'. "+
-      "Analise a estrutura do código existente, leia a documentação informada e gere %s/PROJECT_CONTEXT.md e %s/DEMANDS_INDEX.md.",
+      "Analise a estrutura do código existente, leia a documentação informada e gere %s/PROJECT_CONTEXT.md e %s/demands/INDEX.md.",
     sourceHint, targetDocsDir, targetDocsDir, targetDocsDir,
   )
 
@@ -427,7 +430,7 @@ func runProjectSetup(reader *bufio.Reader, onboarder AgentBinding, defaultDocs s
 
   contextPath := filepath.Join(targetDocsDir, "PROJECT_CONTEXT.md")
   if info, statErr := os.Stat(contextPath); statErr != nil || info.IsDir() {
-    fatal("Etapa 0 terminou sem gerar %s. O ONBOARDER pode ter sido bloqueado por permissões (veja FORGE_ONBOARDER_ARGS em .forge/models.env) ou falhou ao gravar o arquivo.", contextPath)
+    fatal("Etapa 0 terminou sem gerar %s. O ONBOARDER pode ter sido bloqueado por permissões (veja FORGE_ONBOARDER_ARGS em .forge/config/models.env) ou falhou ao gravar o arquivo.", contextPath)
   }
 
   if err := ensureDocsStructureSection(contextPath, targetDocsDir); err != nil {
@@ -479,14 +482,14 @@ func registerDemandInDocs(docsDir, stackName, task, modelsSummary, logName strin
     }
   }
 
-  indexPath := filepath.Join(docsDir, "DEMANDS_INDEX.md")
+  indexPath := filepath.Join(demandsDir, "INDEX.md")
   if _, err := os.Stat(indexPath); os.IsNotExist(err) {
     header := "# Índice de Demandas — forgeloop\n\n| Data | Stack | Demanda | Arquivo | Status |\n| :--- | :--- | :--- | :--- | :--- |\n"
     _ = os.WriteFile(indexPath, []byte(header), 0644)
   }
 
   cleanTask := strings.ReplaceAll(task, "|", "-")
-  row := fmt.Sprintf("| %s | %s | %s | [`%s`](demands/%s) | `IN_PROGRESS` |\n",
+  row := fmt.Sprintf("| %s | %s | %s | [`%s`](%s) | `IN_PROGRESS` |\n",
     datePrefix, stackName, cleanTask, fileName, fileName)
 
   if f, err := os.OpenFile(indexPath, os.O_APPEND|os.O_WRONLY, 0644); err == nil {
@@ -517,14 +520,15 @@ func updateDemandStatus(demandPath, status string, attempts int, tokens TokenSta
   _ = os.WriteFile(demandPath, []byte(content), 0644)
 }
 
-// updateIndexStatus localiza no DEMANDS_INDEX.md (pasta pai de demands/) as linhas da demanda
-// ainda marcadas como IN_PROGRESS e troca pelo novo status.
+// updateIndexStatus localiza no INDEX.md (mesma pasta demands/ da demanda) as linhas da demanda
+// ainda marcadas como IN_PROGRESS e troca pelo novo status. Aceita links relativos ao índice
+// ("(arquivo.md)") e o formato legado "(demands/arquivo.md)".
 func updateIndexStatus(demandPath, status string) {
   if strings.TrimSpace(status) == "" {
     return
   }
   fileName := filepath.Base(demandPath)
-  indexPath := filepath.Join(filepath.Dir(filepath.Dir(demandPath)), "DEMANDS_INDEX.md")
+  indexPath := filepath.Join(filepath.Dir(demandPath), "INDEX.md")
   b, err := os.ReadFile(indexPath)
   if err != nil {
     return
@@ -532,7 +536,8 @@ func updateIndexStatus(demandPath, status string) {
   lines := strings.Split(string(b), "\n")
   changed := false
   for i, line := range lines {
-    if strings.Contains(line, "(demands/"+fileName+")") && strings.Contains(line, "`IN_PROGRESS`") {
+    linked := strings.Contains(line, "("+fileName+")") || strings.Contains(line, "(demands/"+fileName+")")
+    if linked && strings.Contains(line, "`IN_PROGRESS`") {
       lines[i] = strings.Replace(line, "`IN_PROGRESS`", fmt.Sprintf("`%s`", status), 1)
       changed = true
     }
@@ -641,7 +646,7 @@ func runDeterministicChecks(stack StackConfig) bool {
   header := fmt.Sprintf("# Relatório de Verificação Determinística (Etapa 4A)\n\nALL_CHECKS_PASSED: %v\nStack: %s\nTimestamp: %s\n\n",
     allPassed, stack.Name, time.Now().Format(time.RFC3339))
 
-  _ = os.WriteFile(".forge/VERIFY_REPORT.md", []byte(header+report.String()), 0644)
+  _ = os.WriteFile(".forge/state/VERIFY_REPORT.md", []byte(header+report.String()), 0644)
   logEvent("ETAPA 4A: ALL_CHECKS_PASSED=%v", allPassed)
   return allPassed
 }
@@ -848,22 +853,78 @@ func sanitizeTableCell(s string) string {
   return s
 }
 
-func appendTelemetry(stackName, demandFile, modelsSummary string, attempts int, tokens TokenStats, status, note string) {
-  path := ".forge/TELEMETRY.md"
-  if _, err := os.Stat(path); os.IsNotExist(err) {
-    header := "# Telemetria forgeloop\n\n| Data | Stack | Demanda | Bindings Testados | Tentativas | Tokens (In / Out / Total) | Status | Observação |\n| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n"
-    _ = os.WriteFile(path, []byte(header), 0644)
+const (
+  telemetryPath      = ".forge/TELEMETRY.md"
+  telemetryStageCol  = "Tokens (Por Etapa/Loop)"
+  telemetryLegacyCol = "Tokens (In / Out / Total)"
+  telemetryTotalCol  = "Tokens Totais"
+  telemetryHeader    = "# Telemetria forgeloop\n\n" +
+    "| Data | Stack | Demanda | Bindings Testados | Tentativas | " + telemetryStageCol + " | " + telemetryTotalCol + " | Status | Observação |\n" +
+    "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n"
+)
+
+// migrateTelemetry converte um TELEMETRY.md no formato antigo (8 colunas) para o atual (9 colunas),
+// inserindo a coluna "Tokens (Por Etapa/Loop)" antes do total. Linhas que não têm exatamente
+// 8 células ficam intactas. Retorna o novo conteúdo e se houve alteração.
+func migrateTelemetry(content string) (string, bool) {
+  if strings.Contains(content, telemetryStageCol) || !strings.Contains(content, telemetryLegacyCol) {
+    return content, false
+  }
+  lines := strings.Split(content, "\n")
+  for i, line := range lines {
+    if !strings.HasPrefix(line, "|") {
+      continue
+    }
+    parts := strings.Split(line, "|")
+    if len(parts) != 10 { // 8 células
+      continue
+    }
+    insert := " — "
+    switch {
+    case strings.HasPrefix(line, "| Data "):
+      insert = " " + telemetryStageCol + " "
+      parts[6] = strings.Replace(parts[6], telemetryLegacyCol, telemetryTotalCol, 1)
+    case strings.HasPrefix(line, "| :--"):
+      insert = " :--- "
+    }
+    parts = append(parts[:6], append([]string{insert}, parts[6:]...)...)
+    lines[i] = strings.Join(parts, "|")
+  }
+  return strings.Join(lines, "\n"), true
+}
+
+// appendTelemetry registra uma linha em .forge/TELEMETRY.md, incluindo o detalhamento de tokens
+// por etapa/loop (breakdown) além do total consolidado.
+func appendTelemetry(stackName, demandFile, modelsSummary string, attempts int, tokens TokenStats, breakdown []string, status, note string) {
+  path := telemetryPath
+  if b, err := os.ReadFile(path); err != nil {
+    if os.IsNotExist(err) {
+      _ = os.WriteFile(path, []byte(telemetryHeader), 0644)
+    }
+  } else if migrated, changed := migrateTelemetry(string(b)); changed {
+    _ = os.WriteFile(path, []byte(migrated), 0644)
   }
 
   if demandFile == "" {
-    demandFile = "(via PLAN.md)"
+    demandFile = "(via .forge/state/PLAN.md)"
   }
   stackName = sanitizeTableCell(stackName)
   demandFile = sanitizeTableCell(demandFile)
   modelsSummary = sanitizeTableCell(modelsSummary)
   note = sanitizeTableCell(note)
-  row := fmt.Sprintf("| %s | %s | `%s` | %s | %d | %s | **%s** | %s |\n",
-    time.Now().Format("2006-01-02 15:04"), stackName, demandFile, modelsSummary, attempts, tokens.Format(), status, note)
+  status = sanitizeTableCell(status)
+
+  steps := make([]string, 0, len(breakdown))
+  for _, item := range breakdown {
+    steps = append(steps, sanitizeTableCell(item))
+  }
+  stageCell := strings.Join(steps, "<br>")
+  if stageCell == "" {
+    stageCell = "—"
+  }
+
+  row := fmt.Sprintf("| %s | %s | `%s` | %s | %d | %s | %s | **%s** | %s |\n",
+    time.Now().Format("2006-01-02 15:04"), stackName, demandFile, modelsSummary, attempts, stageCell, tokens.Format(), status, note)
 
   if f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0644); err == nil {
     defer f.Close()
@@ -973,12 +1034,26 @@ func reportTokens(a AgentBinding, s TokenStats) {
 // Estrutura de pastas e log de execução
 // ----------------------------------------------------------------------------
 
-// ensureDocsDirs cria <docs>/demands e <docs>/logs.
+// ensureForgeDirs cria .forge/{agents,config,state}.
+func ensureForgeDirs() error {
+  for _, sub := range []string{"agents", "config", "state"} {
+    if err := os.MkdirAll(filepath.Join(".forge", sub), 0755); err != nil {
+      return err
+    }
+  }
+  return nil
+}
+
+// ensureDocsDirs cria <docs>/demands, <docs>/logs e <docs>/references (com .gitkeep).
 func ensureDocsDirs(docsDir string) error {
-  for _, sub := range []string{"demands", "logs"} {
+  for _, sub := range []string{"demands", "logs", "references"} {
     if err := os.MkdirAll(filepath.Join(docsDir, sub), 0755); err != nil {
       return err
     }
+  }
+  keep := filepath.Join(docsDir, "references", ".gitkeep")
+  if _, err := os.Stat(keep); os.IsNotExist(err) {
+    return os.WriteFile(keep, nil, 0644)
   }
   return nil
 }
@@ -996,11 +1071,12 @@ func ensureDocsStructureSection(contextPath, docsDir string) error {
   }
   section := fmt.Sprintf("\n%s\n\n"+
     "- `%s/PROJECT_CONTEXT.md` — contexto do projeto (este arquivo).\n"+
-    "- `%s/DEMANDS_INDEX.md` — índice das demandas (`| Data | Stack | Demanda | Arquivo | Status |`).\n"+
+    "- `%s/demands/INDEX.md` — índice das demandas (`| Data | Stack | Demanda | Arquivo | Status |`).\n"+
     "- `%s/demands/` — um arquivo `AAAA-MM-DD-<slug>.md` por demanda (descrição, blueprint, status, tentativas e tokens).\n"+
+    "- `%s/references/` — material de referência do projeto (specs, links, artigos).\n"+
     "- `%s/logs/` — um log completo por execução: `AAAA-MM-DD_HHMMSS-<slug>.log` (com demanda) ou `AAAA-MM-DD_HHMMSS-forge<N>.log` (sem demanda). "+
     "Cada demanda aponta para o seu log no campo **Log de Execução**.\n",
-    docsStructureMarker, docsDir, docsDir, docsDir, docsDir)
+    docsStructureMarker, docsDir, docsDir, docsDir, docsDir, docsDir)
   sep := ""
   if !strings.HasSuffix(string(b), "\n") {
     sep = "\n"
@@ -1394,16 +1470,16 @@ func runInit(docsDir string, agents []AgentBinding, forceSkills bool) {
   code := 0
 
   // (d) Estrutura de pastas e log primeiro, para que tudo abaixo fique registrado.
-  if err := os.MkdirAll(".forge", 0755); err != nil {
-    fatal("Erro ao criar .forge: %v", err)
+  if err := ensureForgeDirs(); err != nil {
+    fatal("Erro ao criar .forge/: %v", err)
   }
   if err := ensureDocsDirs(docsDir); err != nil {
     fatal("Erro ao criar estrutura de pastas em %s: %v", docsDir, err)
   }
   startRunLog(docsDir, "init")
   logBlock("CABEÇALHO DA EXECUÇÃO (-init)", fmt.Sprintf("Data/Hora: %s\nDocs: %s/\nForce skills: %v\n", time.Now().Format(time.RFC3339), docsDir, forceSkills))
-  fmt.Printf("[OK] Pastas prontas: .forge/, %s/demands/, %s/logs/\n", docsDir, docsDir)
-  logEvent("Pastas prontas: .forge/, %s/demands/, %s/logs/", docsDir, docsDir)
+  fmt.Printf("[OK] Pastas prontas: .forge/{agents,config,state}/, %s/demands/, %s/logs/, %s/references/\n", docsDir, docsDir, docsDir)
+  logEvent("Pastas prontas: .forge/{agents,config,state}/, %s/demands/, %s/logs/, %s/references/", docsDir, docsDir, docsDir)
 
   // (a) Binários
   names := []string{}

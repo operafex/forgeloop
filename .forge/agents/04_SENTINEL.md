@@ -6,7 +6,7 @@ Você é o auditor de segurança automatizado (AppSec). Sua missão é inspecion
 
 ## Regras Estritas de Isolamento
 1. **Somente Leitura no Código:** Nunca edite código de produção nem testes.
-2. **Saída Única:** Grave seu relatório exclusivamente em `.forge/SECURITY_REPORT.md`.
+2. **Saída Única:** Grave seu relatório exclusivamente em `.forge/state/SECURITY_REPORT.md`.
 
 ## Fluxo Obrigatório
 1. Execute `git diff` e `git status` para mapear todas as linhas adicionadas ou modificadas nesta tarefa.
@@ -15,7 +15,7 @@ Você é o auditor de segurança automatizado (AppSec). Sua missão é inspecion
    - **Autenticação & Controle de Acesso:** Broken Access Control, IDOR, ausência de verificação de escopo/tenant, tokens fracos.
    - **Exposição de Dados & Segredos:** Chaves, senhas, tokens hardcoded, logs vazando PII ou stack traces sensíveis.
    - **Concorrência & Recursos:** *Race conditions*, ausência de *rate limit* ou *timeouts*, DoS por payload ilimitado.
-3. **Veredito (Topo de `.forge/SECURITY_REPORT.md`):**
+3. **Veredito (Topo de `.forge/state/SECURITY_REPORT.md`):**
    - `SEC_STATUS: PASS` — Nenhuma vulnerabilidade crítica, alta ou média detectada no `git diff`.
    - `SEC_STATUS: VULNERABILITY_FOUND` — Liste cada vulnerabilidade com severidade (`CRITICAL`/`HIGH`/`MEDIUM`), arquivo, linha e correção exigida.
 

@@ -37,9 +37,9 @@ go run forgeloop.go -init -force-skills   # reinstall/update every skill
 `-init`:
 
 1. checks that the configured binaries (`claude`, `agy`, `npx`, `git`) are on your `$PATH` (`[OK]` / `[AUSENTE]`);
-2. collects the unique skills from the `FORGE_*_SKILL` variables (`.forge/models.env` / environment);
+2. collects the unique skills from the `FORGE_*_SKILL` variables (`.forge/config/models.env` / environment);
 3. installs the missing ones with `npx skills add <skill> -g -y` (all of them with `-force-skills`). A skill counts as present if a folder with its name exists in `skills/`, `.agents/skills/`, `~/.claude/skills/` or `~/.antigravity/skills/`, or if `skills-lock.json` lists it as a source;
-4. creates `.forge/`, `<docs>/demands/` and `<docs>/logs/` and writes its own log to `<docs>/logs/`.
+4. creates `.forge/{agents,config,state}/`, `<docs>/demands/`, `<docs>/logs/` and `<docs>/references/` and writes its own log to `<docs>/logs/`.
 
 It exits with code `1` if a binary is missing or a skill failed to install. Every normal run also performs a quick pre-flight check and warns (without blocking) if a configured skill is not installed.
 
@@ -49,7 +49,7 @@ It exits with code `1` if a binary is missing or a skill failed to install. Ever
 go run forgeloop.go -setup
 ```
 
-Creates `<docs>/PROJECT_CONTEXT.md`, `<docs>/DEMANDS_INDEX.md`, `<docs>/demands/` and `<docs>/logs/`.
+Creates `<docs>/PROJECT_CONTEXT.md`, `<docs>/demands/INDEX.md`, `<docs>/demands/`, `<docs>/logs/` and `<docs>/references/`.
 
 ### 3. Run a new demand — `-task` (Stages 1 to 5)
 
@@ -60,13 +60,13 @@ go run forgeloop.go -task "Implement JWT authentication with refresh tokens"
 Start from a later Stage with `-stage` (`-forge` is kept as a compatibility alias):
 
 ```bash
-go run forgeloop.go -stage 2    # TEMPER onwards (reuses the existing PLAN.md / tests)
+go run forgeloop.go -stage 2    # TEMPER onwards (reuses the existing .forge/state/PLAN.md / tests)
 go run forgeloop.go -stage 3    # STRIKE onwards
 ```
 
 ### 4. Try different model combinations
 
-Edit `.forge/models.env` or override with environment variables:
+Edit `.forge/config/models.env` or override with environment variables:
 
 ```bash
 FORGE_BUILDER_MODEL="GPT-OSS 120B (Medium)" go run forgeloop.go -task "Add cursor pagination"
@@ -79,10 +79,15 @@ Each agent has `FORGE_<AGENT>_BIN`, `_MODEL` and `_ARGS` (extra CLI flags, e.g. 
 ```text
 <docs>/
 ├── PROJECT_CONTEXT.md     # project context (Stage 0)
-├── DEMANDS_INDEX.md       # | Data | Stack | Demanda | Arquivo | Status |
 ├── demands/               # one file per demand, linked to its execution log
-└── logs/                  # one full log per run: YYYY-MM-DD_HHMMSS-<slug>.log
-.forge/                    # agent prompts, models.env, transient artifacts (PLAN, DECISION, ...)
+│   └── INDEX.md           # | Data | Stack | Demanda | Arquivo | Status |
+├── logs/                  # one full log per run: YYYY-MM-DD_HHMMSS-<slug>.log
+└── references/            # reference material (created by -init / -setup)
+.forge/
+├── agents/                # agent contracts (00_ONBOARDER.md ... 05_ARBITER.md)
+├── config/                # models.env (versioned), project.env (git-ignored)
+├── state/                 # transient artifacts: PLAN, TEST_CASES, DECISION, ... (git-ignored)
+└── TELEMETRY.md           # one row per run: tokens per stage/loop + consolidated total
 ```
 
 Logs contain the prompt and the full response of every agent, the complete test/linter output, the generated review/security/decision reports, durations, token counts and the final exit code.

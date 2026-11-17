@@ -2,7 +2,7 @@
 
 # forgeloop
 
-Orquestrador de **Loop Engineering** orientado a especificações, TDD estrito e auditoria de segurança automatizada. Escrito em Go **sem dependências externas** (apenas a biblioteca padrão) e projetado para operar 100% via sessões de CLI autenticadas por OAuth (`claude` e `agy`) — sem chaves de API.
+Orquestrador de **Loop Engineering** orientado a especificações, TDD estrito e auditoria de segurança automatizada. Escrito em Go **sem dependências externas** (apenas a biblioteca padrão).
 
 ## Uma Forja, Seis Etapas
 

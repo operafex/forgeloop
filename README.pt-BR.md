@@ -24,7 +24,7 @@ As Etapas 3 → 4 → 5 rodam em loop fechado até o ARBITER aprovar, pedir corr
 ## Requisitos
 
 - Go 1.22+
-- CLIs `claude` e `agy` autenticadas via OAuth
+- CLIs `claude` e `agy`
 - `npx` (Node.js) e `git`
 
 ## Uso Rápido
@@ -60,7 +60,14 @@ Durante o `-setup`, o `forgeloop` inspeciona deterministicamente marcadores na r
 - `Gemfile` com `gem 'rails'` → Ruby on Rails (`bundle exec rspec` se existir o diretório `spec/`, senão `bin/rails test`, além de `bundle exec rubocop`);
 - `package.json` → Node.js ou TypeScript + Node.js (se existir `tsconfig.json` ou `typescript` em dependencies/devDependencies; `npm run lint` se a chave `lint` estiver em `scripts`).
 
-O agente `ONBOARDER` confirma ou ajusta a stack identificada, e a configuração é gravada em `.forge/config/project.env`:
+Durante o `-setup`, a stack detectada é exibida e a confirmação é solicitada antes de qualquer gravação:
+
+```text
+[STACK] Detectada: Go (testes: go test -v -race ./...)
+Confirmar esta stack como padrão do projeto? [S/n] (ou digite 'p' para personalizar): 
+```
+
+Enter, `S` ou `s` confirma a stack detectada; `p` (ou `n`) abre o menu de stacks para escolher outra; qualquer outra resposta aborta o setup sem gravar. Quando nenhuma stack é detectada, não há pergunta. Em seguida, o agente `ONBOARDER` confirma ou ajusta a stack, e a configuração é gravada em `.forge/config/project.env`:
 
 ```env
 FORGE_STACK_NAME="Go"
@@ -69,7 +76,19 @@ FORGE_TYPE_CMD="go vet ./..."
 FORGE_LINT_CMD=""
 ```
 
-Ao iniciar uma demanda com `-task`, o `forgeloop` exibe a stack salva como primeira opção:
+Ao iniciar uma demanda com `-task`, `-stage` ou `-demand`, o `forgeloop` usa a stack salva em `.forge/config/project.env` em silêncio — o fluxo não exige confirmação de stack a cada rodada:
+
+```text
+[INFO] Stack do projeto: Go (via project.env)
+```
+
+Para trocar a stack, use `-select-stack`: ele abre o menu mesmo com um `project.env` válido e salva a escolha. O menu também abre automaticamente quando o `project.env` está ausente ou incompleto.
+
+```bash
+go run . -task "Implementar autenticação JWT" -select-stack
+```
+
+O menu do `-select-stack` é assim:
 
 ```text
 Qual stack deve ser utilizada nesta execução?
@@ -104,6 +123,14 @@ Comece de uma Etapa posterior com `-stage` (`-forge` continua funcionando como a
 go run . -stage 2    # a partir de TEMPER (reaproveita .forge/state/PLAN.md / testes existentes)
 go run . -stage 3    # a partir de STRIKE
 ```
+
+### Retomada de Execução e Vinculação de Demandas
+
+Você pode retomar execuções interrompidas ou vincular demandas existentes:
+
+- `-resume`: Restaura o estado exato gravado em `.forge/state/RESUME.env` após interrupções (como limites de cota).
+- `-stage <1..5>`: Inicia a execução diretamente em qualquer etapa (1 a 5).
+- `-demand <arquivo.md>`: Vincula uma demanda existente em `<docsDir>/demands/` (ex.: `-demand 2026-11-17-feature.md`) sem gerar duplicações no índice.
 
 ### 4. Testar combinações de modelos
 
@@ -140,6 +167,24 @@ Além dos agentes, o `.forge/config/models.env` controla variáveis globais do f
 - `FORGE_MAX_ATTEMPTS`: Limite de tentativas no loop de correção (padrão: `3`).
 - `FORGE_DEFAULT_DOCS_DIR`: Diretório padrão de documentação (padrão: `docs`).
 
+### Autenticação e Fallback OmniRoute
+
+Por padrão (`FORGE_AUTH_MODE="api_key"`, definido em `.forge/config/models.env`), os agentes se autenticam com chaves de API dos provedores que residem **exclusivamente** em `.forge/config/project.env` (ignorado pelo git, gravado com permissão `0600`), isolando os custos por projeto:
+- `ANTHROPIC_API_KEY`: chave da Anthropic (`FORGE_API_KEY` é aceita como alias).
+- `OPENAI_API_KEY`: chave da OpenAI.
+- `GEMINI_API_KEY`: chave do Google Gemini.
+
+Todas as chaves configuradas são injetadas no subprocesso de cada agente. A validação pre-flight do modo `api_key` exige ao menos uma delas (variáveis do ambiente têm precedência sobre o arquivo). O `forgeloop` emite um aviso se encontrar chaves de API no `.forge/config/models.env` versionado.
+
+Em caso de limite de cota ou rate limit, o `forgeloop` realiza fallback transparente para o `OmniRoute`:
+- `FORGE_OMNIROUTE_ENABLED`: Ativa o fallback automático via OmniRoute quando `true` (padrão: `false`).
+- `FORGE_OMNIROUTE_URL`: Endereço do servidor OmniRoute (padrão: `http://localhost:20128`).
+- `FORGE_OMNIROUTE_MODEL`: Modelo roteado via OmniRoute (padrão: `claude-sonnet-4-6`).
+
+### Cross-Auditing (Multi-LLM)
+
+Utilize até 5 modelos diferentes nas etapas. É fortemente recomendado usar no mínimo 2 provedores distintos — ex.: Anthropic no BUILDER e OpenAI/Gemini no ARBITER — para evitar viés de confirmação na auditoria do código. Configure cada etapa via `FORGE_<AGENTE>_BIN` / `FORGE_<AGENTE>_MODEL` no `.forge/config/models.env` e guarde as chaves dos provedores correspondentes no `.forge/config/project.env`.
+
 ### Formas de Personalização
 
 A precedência de configuração segue: **Flags CLI > Variáveis de Ambiente > `.forge/config/models.env` > Valores padrão em código**.
@@ -175,6 +220,7 @@ A precedência de configuração segue: **Flags CLI > Variáveis de Ambiente > `
 ├── config/                # models.env (versionado), project.env (ignorado pelo git)
 ├── state/                 # artefatos transitórios: PLAN, TEST_CASES, DECISION, ... (ignorado)
 └── telemetry/             # métricas em CSV (cabeçalho criado no primeiro uso, depois só append)
+    ├── TELEMETRY.md       # .forge/telemetry/TELEMETRY.md: KPIs + histórico, regenerado a partir dos CSVs ao final de cada Forja
     ├── runs.csv           # uma linha por execução: tentativas, tokens in/out/total, status final
     └── events.csv         # uma linha por etapa/agente: tokens, duração, tentativa (junta com runs.csv via RunID)
 ```
@@ -183,13 +229,16 @@ Os logs trazem o prompt e a resposta completa de cada agente, a saída integral 
 
 ## Códigos de saída
 
+Quando o SKEPTIC responde `SPEC_STATUS: REVISION_REQUIRED`, o motor volta sozinho à Etapa 1 (o ARCHITECT recebe o parecer e corrige plano e testes) até `-max-attempts`; o código `2` só ocorre quando essas tentativas se esgotam.
+
 | Código | Significado |
 | :--- | :--- |
 | `0` | `APPROVE_MERGE` (ou `-init`/`-setup` bem-sucedido) |
 | `1` | Erro fatal ou circuit breaker acionado |
-| `2` | Especificação bloqueada pelo SKEPTIC (Etapa 2) |
+| `2` | Especificação bloqueada pelo SKEPTIC (Etapa 2) após esgotar `-max-attempts` |
 | `3` | `AMEND_TEST` — teste da Etapa 1 precisa de correção |
 | `4` | `ESCALATE_ARCHITECT` |
+| `5` | Limite de cota ou tokens atingido (estado gravado em `RESUME.env`, retomável com `-resume`) |
 
 ## Testes
 

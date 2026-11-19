@@ -1,8 +1,13 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
+	"sort"
 	"strings"
 )
 
@@ -10,6 +15,79 @@ const (
 	authModeAPIKey  = "api_key"
 	authModeAnother = "another"
 )
+
+var providerAPIKeyNames = []string{"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "FORGE_API_KEY"}
+
+func isProviderKey(key string) bool {
+	for _, p := range providerAPIKeyNames {
+		if p == key {
+			return true
+		}
+	}
+	return false
+}
+
+// readProjectAPIKeys lê as chaves de API dos provedores configuradas em path (project.env).
+// Sempre retorna um mapa não nil (vazio se o arquivo não existir ou se não houver chaves válidas).
+func readProjectAPIKeys(path string) (map[string]string, error) {
+	result := make(map[string]string)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return result, nil
+		}
+		return result, fmt.Errorf("lendo %s: %w", path, err)
+	}
+
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, "export ") {
+			line = strings.TrimSpace(strings.TrimPrefix(line, "export "))
+		}
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		k = strings.TrimSpace(k)
+		if !isProviderKey(k) {
+			continue
+		}
+		cleaned := cleanEnvValue(v)
+		if cleaned == "" {
+			continue
+		}
+		if _, exists := result[k]; !exists {
+			result[k] = cleaned
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return result, fmt.Errorf("lendo %s: %w", path, err)
+	}
+	return result, nil
+}
+
+// projectAwareGetenv retorna uma função de consulta de variáveis que prioriza o ambiente real (getenv)
+// e recorre às chaves lidas do project.env caso a variável esteja ausente ou vazia no ambiente.
+func projectAwareGetenv(keys map[string]string, getenv func(string) string) func(string) string {
+	return func(k string) string {
+		if getenv != nil {
+			v := getenv(k)
+			if strings.TrimSpace(v) != "" {
+				return v
+			}
+		}
+		if keys != nil {
+			if v, ok := keys[k]; ok {
+				return v
+			}
+		}
+		return ""
+	}
+}
 
 // resolveAuthMode normaliza e valida o modo de autenticação informado.
 // Retorna "api_key" como padrão se raw estiver vazio.
@@ -41,10 +119,12 @@ func validateAuthConfig(authMode string, getenv func(string) string) error {
 		if strings.EqualFold(strings.TrimSpace(getenv("FORGE_OMNIROUTE_ENABLED")), "true") {
 			return nil
 		}
-		if strings.TrimSpace(getenv("LLM_API_KEY")) != "" || strings.TrimSpace(getenv("FORGE_API_KEY")) != "" {
-			return nil
+		for _, k := range providerAPIKeyNames {
+			if cleanEnvValue(getenv(k)) != "" {
+				return nil
+			}
 		}
-		return errors.New("API key ausente: defina LLM_API_KEY em .forge/config/models.env ou exporte LLM_API_KEY (FORGE_API_KEY também é aceita)")
+		return errors.New("nenhuma API key encontrada: adicione ANTHROPIC_API_KEY, OPENAI_API_KEY ou GEMINI_API_KEY em .forge/config/project.env (FORGE_API_KEY também é aceita)")
 	default:
 		return fmt.Errorf("modo de autenticação inválido: %q", authMode)
 	}
@@ -117,14 +197,13 @@ func buildAgentEnv(base []string, authMode string, omni OmniRouteConfig, useOmni
 	}
 
 	if authMode == authModeAPIKey {
-		// Primeiro valor não vazio de cada chave (já sem aspas externas/espaços).
-		vals := map[string]string{}
+		vals := make(map[string]string)
 		for _, kv := range base {
 			k, v, ok := strings.Cut(kv, "=")
 			if !ok {
 				continue
 			}
-			if k != "ANTHROPIC_API_KEY" && k != "LLM_API_KEY" && k != "FORGE_API_KEY" {
+			if !isProviderKey(k) {
 				continue
 			}
 			if cleaned := cleanEnvValue(v); cleaned != "" && vals[k] == "" {
@@ -132,30 +211,30 @@ func buildAgentEnv(base []string, authMode string, omni OmniRouteConfig, useOmni
 			}
 		}
 
-		// O CLI `claude` lê ANTHROPIC_API_KEY; LLM_API_KEY (models.env) e FORGE_API_KEY são fontes alternativas.
-		key := vals["ANTHROPIC_API_KEY"]
-		if key == "" {
-			key = vals["LLM_API_KEY"]
-		}
-		if key == "" {
-			key = vals["FORGE_API_KEY"]
+		anthropic := vals["ANTHROPIC_API_KEY"]
+		if anthropic == "" {
+			anthropic = vals["FORGE_API_KEY"]
 		}
 
-		res := make([]string, 0, len(base)+2)
+		res := make([]string, 0, len(base)+3)
 		for _, kv := range base {
-			if key != "" && strings.HasPrefix(kv, "ANTHROPIC_API_KEY=") {
-				continue
-			}
-			if vals["LLM_API_KEY"] == "" && vals["FORGE_API_KEY"] != "" && strings.HasPrefix(kv, "LLM_API_KEY=") {
+			if strings.HasPrefix(kv, "LLM_API_KEY=") ||
+				strings.HasPrefix(kv, "ANTHROPIC_API_KEY=") ||
+				strings.HasPrefix(kv, "OPENAI_API_KEY=") ||
+				strings.HasPrefix(kv, "GEMINI_API_KEY=") {
 				continue
 			}
 			res = append(res, kv)
 		}
-		if vals["LLM_API_KEY"] == "" && vals["FORGE_API_KEY"] != "" {
-			res = append(res, "LLM_API_KEY="+vals["FORGE_API_KEY"])
+
+		if anthropic != "" {
+			res = append(res, "ANTHROPIC_API_KEY="+anthropic)
 		}
-		if key != "" {
-			res = append(res, "ANTHROPIC_API_KEY="+key)
+		if v := vals["OPENAI_API_KEY"]; v != "" {
+			res = append(res, "OPENAI_API_KEY="+v)
+		}
+		if v := vals["GEMINI_API_KEY"]; v != "" {
+			res = append(res, "GEMINI_API_KEY="+v)
 		}
 		return res
 	}
@@ -163,4 +242,50 @@ func buildAgentEnv(base []string, authMode string, omni OmniRouteConfig, useOmni
 	res := make([]string, len(base))
 	copy(res, base)
 	return res
+}
+
+// apiKeysInModelsEnv vasculha content em busca de chaves de API dos provedores ou LLM_API_KEY.
+// Retorna os nomes únicos e ordenados que possuam valor não vazio, ou nil caso nenhuma seja encontrada.
+func apiKeysInModelsEnv(content string) []string {
+	seen := make(map[string]bool)
+	scanner := bufio.NewScanner(strings.NewReader(content))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, "export ") {
+			line = strings.TrimSpace(strings.TrimPrefix(line, "export "))
+		}
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		k = strings.TrimSpace(k)
+		if !isProviderKey(k) && k != "LLM_API_KEY" {
+			continue
+		}
+		if cleanEnvValue(v) != "" {
+			seen[k] = true
+		}
+	}
+
+	if len(seen) == 0 {
+		return nil
+	}
+
+	var res []string
+	for k := range seen {
+		res = append(res, k)
+	}
+	sort.Strings(res)
+	return res
+}
+
+// modelsEnvKeyWarning gera a mensagem de aviso caso chaves de API sejam encontradas em models.env.
+func modelsEnvKeyWarning(names []string) string {
+	if len(names) == 0 {
+		return ""
+	}
+	return "[AVISO] Chaves de API encontradas em .forge/config/models.env (versionado): " + strings.Join(names, ", ") + ". Mova-as para .forge/config/project.env (ignorado pelo git) e remova-as do models.env."
 }

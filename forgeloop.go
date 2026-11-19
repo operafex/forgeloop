@@ -66,6 +66,11 @@ func main() {
 
   loadEnvFile(".forge/config/models.env")
   loadEnvFile(".forge/config/project.env")
+  if b, err := os.ReadFile(".forge/config/models.env"); err == nil {
+    if msg := modelsEnvKeyWarning(apiKeysInModelsEnv(string(b))); msg != "" {
+      fmt.Fprintln(yellowWriter(os.Stdout), msg)
+    }
+  }
 
   setupMode := flag.Bool("setup", false, "Etapa 0 (Discovery): analisa projeto existente e mapeia documentação")
   taskFlag := flag.String("task", "", "Descrição da nova demanda (salva automaticamente em /docs/demands/)")
@@ -73,6 +78,7 @@ func main() {
   resumeFlag := flag.Bool("resume", false, "Retoma a execução interrompida a partir de .forge/state/RESUME.env")
   initMode := flag.Bool("init", false, "Verifica binários, instala skills ausentes (npx skills add) e cria a estrutura de pastas")
   forceSkills := flag.Bool("force-skills", false, "Com -init: reinstala/atualiza todas as skills configuradas, mesmo as já presentes")
+  selectStackFlag := flag.Bool("select-stack", false, "Abre o menu de seleção de stack mesmo com .forge/config/project.env válido e salva a escolha")
   stageFlag := flag.Int("stage", 1, "Etapa inicial da Forja: 1 a 5 (1: Blueprint, 2: Temper, 3: Strike, 4: Quench, 5: Assay)")
   forgeAlias := flag.Int("forge", 1, "Alias de compatibilidade para -stage (1 a 5)")
   maxAttempts := flag.Int("max-attempts", getEnvInt("FORGE_MAX_ATTEMPTS", 3), "Limite máximo de tentativas no loop (Circuit Breaker)")
@@ -147,7 +153,11 @@ func main() {
   if err != nil {
     fatal("%v", err)
   }
-  if err := validateAuthConfig(authMode, os.Getenv); err != nil {
+  projectKeys, keysErr := readProjectAPIKeys(projectEnvPath)
+  if keysErr != nil {
+    fmt.Printf("[AVISO] %v\n", keysErr)
+  }
+  if err := validateAuthConfig(authMode, projectAwareGetenv(projectKeys, os.Getenv)); err != nil {
     fatal("%v", err)
   }
   omni := loadOmniRouteConfig(os.Getenv)
@@ -208,7 +218,7 @@ func main() {
       demandFile = df
     }
 
-    s, err := selectStack(reader, os.Stdout, projectEnvPath)
+    s, err := resolveRunStack(reader, os.Stdout, projectEnvPath, *selectStackFlag)
     if err != nil {
       fatal("%v", err)
     }
@@ -294,68 +304,67 @@ func main() {
   }
 
   // =========================================================================
-  // ETAPA 1 — BLUEPRINT: ARCHITECT (Spec-TDD-Planner / Superpowers)
+  // ETAPAS 1 e 2 — BLUEPRINT (ARCHITECT) ↔ TEMPER (SKEPTIC): loop autônomo de especificação
   // =========================================================================
-  if shouldRunStage(1, startStage, 1, 1) {
-    printBanner("ETAPA 1: BLUEPRINT — ARCHITECT", fmt.Sprintf("Skill: %s | Modelo: %s (%s)", architect.Skill, architect.Model, architect.Bin))
-    prompt := fmt.Sprintf(
-      "Siga estritamente as instruções de @.forge/agents/01_ARCHITECT.md aplicando a skill %s. "+
-        "Diretório de documentação do projeto: %s/ (leia %s/PROJECT_CONTEXT.md se existir). "+
-        "Stack selecionada: %s. Demanda: %s (arquivo de registro: %s). "+
-        "Gere .forge/state/PLAN.md (dividido em Tasks atômicas), .forge/state/TEST_CASES.md, anexe o plano técnico em %s e crie os testes automatizados em estado RED.",
-      architect.Skill, docsDir, docsDir, stack.Name, task, demandFile, demandFile,
-    )
-    prompt += referencesPrompt(refs)
-    start := time.Now()
-    res := runAgentStep(architect, prompt, *jsonMetrics, authMode, omni)
-    recordEventTelemetry(runID, "F1", architect.Alias, res.Model, 1, res.Stats, time.Since(start).Seconds())
-    totalTokens.Add(res.Stats)
-    if res.Quota {
-      handleQuotaPause(1, architect.Forge+": "+architect.Stage, res, 1)
-    }
-    if res.Err != nil {
-      fatal("Falha na Etapa 1 (ARCHITECT): %v", res.Err)
-    }
-    reportTokens(architect, res.Stats)
-  }
-
-  // =========================================================================
-  // ETAPA 2 — TEMPER: SKEPTIC (Cold-Global-Lens / Elephant-Goldfish)
-  // =========================================================================
-  if shouldRunStage(2, startStage, 1, 1) {
-    printBanner("ETAPA 2: TEMPER — SKEPTIC", fmt.Sprintf("Skill: %s | Modelo: %s (%s)", skeptic.Skill, skeptic.Model, skeptic.Bin))
-    prompt := fmt.Sprintf(
+  if startStage <= 2 {
+    skepPrompt := fmt.Sprintf(
       "Siga estritamente as instruções de @.forge/agents/02_SKEPTIC.md aplicando a skill %s. "+
         "Diretório de documentação: %s/. Audite @.forge/state/PLAN.md, @.forge/state/TEST_CASES.md e os arquivos de teste recém-criados. "+
         "Grave seu veredito em .forge/state/SPEC_REVIEW.md.",
       skeptic.Skill, docsDir,
     )
-
-    start := time.Now()
-    res := runAgentStep(skeptic, prompt, *jsonMetrics, authMode, omni)
-    recordEventTelemetry(runID, "F2", skeptic.Alias, res.Model, 1, res.Stats, time.Since(start).Seconds())
-    totalTokens.Add(res.Stats)
-    if res.Quota {
-      handleQuotaPause(2, skeptic.Forge+": "+skeptic.Stage, res, 1)
-    }
-    if res.Err != nil {
-      fatal("Falha na Etapa 2 (SKEPTIC): %v", res.Err)
-    }
-    reportTokens(skeptic, res.Stats)
-
-    reviewContent, err := readFile(".forge/state/SPEC_REVIEW.md")
-    if err != nil {
-      fatal("Não foi possível ler .forge/state/SPEC_REVIEW.md: %v", err)
-    }
-    logBlock(".forge/state/SPEC_REVIEW.md", reviewContent)
-
-    if !strings.Contains(reviewContent, "SPEC_STATUS: APPROVED") {
+    outcome := runSpecLoop(startStage, *maxAttempts, specLoopDeps{
+      RunArchitect: func(specAttempt int) AgentResult {
+        printBanner(fmt.Sprintf("ETAPA 1: BLUEPRINT — ARCHITECT (Tentativa %d/%d)", specAttempt, *maxAttempts),
+          fmt.Sprintf("Skill: %s | Modelo: %s (%s)", architect.Skill, architect.Model, architect.Bin))
+        start := time.Now()
+        res := runAgentStep(architect, buildArchitectPrompt(architect.Skill, docsDir, stack.Name, task, demandFile, refs, specAttempt, *maxAttempts), *jsonMetrics, authMode, omni)
+        recordEventTelemetry(runID, "F1", architect.Alias, res.Model, specAttempt, res.Stats, time.Since(start).Seconds())
+        if !res.Quota && res.Err == nil {
+          reportTokens(architect, res.Stats)
+        }
+        return res
+      },
+      RunSkeptic: func(specAttempt int) AgentResult {
+        printBanner(fmt.Sprintf("ETAPA 2: TEMPER — SKEPTIC (Tentativa %d/%d)", specAttempt, *maxAttempts),
+          fmt.Sprintf("Skill: %s | Modelo: %s (%s)", skeptic.Skill, skeptic.Model, skeptic.Bin))
+        start := time.Now()
+        res := runAgentStep(skeptic, skepPrompt, *jsonMetrics, authMode, omni)
+        recordEventTelemetry(runID, "F2", skeptic.Alias, res.Model, specAttempt, res.Stats, time.Since(start).Seconds())
+        if !res.Quota && res.Err == nil {
+          reportTokens(skeptic, res.Stats)
+        }
+        return res
+      },
+      ReadReview: func() (string, error) {
+        c, err := readFile(".forge/state/SPEC_REVIEW.md")
+        if err == nil {
+          logBlock(".forge/state/SPEC_REVIEW.md", c)
+        }
+        return c, err
+      },
+      Warn: func(msg string) {
+        fmt.Println(msg)
+        logEvent("%s", msg)
+      },
+    })
+    totalTokens.Add(outcome.Tokens) // soma de todas as reiterações, antes de qualquer desvio
+    switch {
+    case outcome.QuotaStage == 1:
+      handleQuotaPause(1, architect.Forge+": "+architect.Stage, outcome.QuotaResult, 1)
+    case outcome.QuotaStage == 2:
+      handleQuotaPause(2, skeptic.Forge+": "+skeptic.Stage, outcome.QuotaResult, 1)
+    case outcome.FailedStage == 1:
+      fatal("Falha na Etapa 1 (ARCHITECT): %v", outcome.Err)
+    case outcome.FailedStage == 2:
+      fatal("Falha na Etapa 2 (SKEPTIC): %v", outcome.Err)
+    case outcome.Decision != specApproved:
       updateDemandStatus(demandFile, "SPEC_REVISION_REQUIRED", 0, totalTokens)
-      recordRunTelemetry(runID, stack.Name, demandFile, *maxAttempts, 0, totalTokens, "SPEC_REVISION_REQUIRED", "Bloqueado pelo SKEPTIC na Etapa 2")
-      printBanner("BLOQUEIO NA ETAPA 2 (TEMPER)", "O SKEPTIC exigiu ajustes na especificação. Consulte .forge/state/SPEC_REVIEW.md e rode novamente a Etapa 1.")
+      recordRunTelemetry(runID, stack.Name, demandFile, *maxAttempts, 0, totalTokens, "SPEC_REVISION_REQUIRED", specAbortNote(outcome.Attempts))
+      printBanner("BLOQUEIO NA ETAPA 2 (TEMPER)", fmt.Sprintf("O SKEPTIC exigiu ajustes em %d tentativa(s) de especificação. Consulte .forge/state/SPEC_REVIEW.md.", outcome.Attempts))
       finish(2)
     }
-    fmt.Println("\n[OK] Especificação aprovada (SPEC_STATUS: APPROVED). Entrando no ciclo Strike -> Quench -> Assay...")
+    fmt.Printf("\n[OK] Especificação aprovada (SPEC_STATUS: APPROVED) na tentativa %d/%d. Entrando no ciclo Strike -> Quench -> Assay...\n", outcome.Attempts, *maxAttempts)
   }
 
   // =========================================================================
@@ -542,13 +551,12 @@ func runProjectSetup(reader *bufio.Reader, onboarder AgentBinding, defaultDocs s
   logBlock("CABEÇALHO DA EXECUÇÃO", buildRunHeader(StackConfig{Name: "(n/a — Etapa 0 Discovery)"}, []AgentBinding{onboarder},
     "", "", 0, 0, targetDocsDir))
 
-  detected, ok, envErr := setupProjectEnv(projectEnvPath, ".", targetDocsDir, existingDocs)
+  detected, ok, envErr := confirmSetupStack(reader, os.Stdout, projectEnvPath, ".", targetDocsDir, existingDocs)
   if envErr != nil {
     fatal("Erro ao gravar %s: %v", projectEnvPath, envErr)
   }
   if ok {
-    fmt.Printf("[STACK] Detectada: %s (testes: %s)\n", detected.Name, detected.TestCmd)
-    logEvent("STACK DETECTADA: %s (testes: %s)", detected.Name, detected.TestCmd)
+    logEvent("STACK CONFIRMADA: %s (testes: %s)", detected.Name, detected.TestCmd)
   } else {
     fmt.Println("[AVISO] Stack não detectada automaticamente. O ONBOARDER tentará identificá-la.")
     logEvent("AVISO: stack não detectada automaticamente")
@@ -1052,6 +1060,7 @@ func recordRunTelemetry(runID, stack, demandFile string, maxAttempts, attempts i
   if err := appendCSVRecord(runsCSVPath, runsCSVHeader, record); err != nil {
     fmt.Printf("[AVISO] Falha ao gravar %s: %v\n", runsCSVPath, err)
   }
+  renderTelemetryMarkdown()
 }
 
 // recordEventTelemetry registra em .forge/telemetry/events.csv uma linha por etapa/agente executado.

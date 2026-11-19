@@ -267,8 +267,11 @@ func writeProjectEnv(path string, updates map[string]string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("criando diretório pai de %s: %w", path, err)
 	}
-	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
 		return fmt.Errorf("gravando %s: %w", path, err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		return fmt.Errorf("ajustando permissão de %s: %w", path, err)
 	}
 	return nil
 }
@@ -291,6 +294,65 @@ func setupProjectEnv(envPath, root, docsDir, existingDocs string) (StackConfig, 
 		return detected, true, nil
 	}
 	return StackConfig{}, false, nil
+}
+
+// confirmSetupStack pede confirmação da stack detectada no -setup e grava a escolha em project.env.
+// Sem stack detectada não há pergunta: apenas as chaves de documentação são gravadas.
+func confirmSetupStack(reader *bufio.Reader, out io.Writer, envPath, root, docsDir, existingDocs string) (StackConfig, bool, error) {
+	updates := map[string]string{
+		"FORGE_DOCS_DIR":      docsDir,
+		"FORGE_EXISTING_DOCS": existingDocs,
+	}
+	detected, ok := detectStack(root)
+	if !ok {
+		return StackConfig{}, false, writeProjectEnv(envPath, updates)
+	}
+
+	fmt.Fprintf(out, "[STACK] Detectada: %s (testes: %s)\n", detected.Name, detected.TestCmd)
+	fmt.Fprint(out, "Confirmar esta stack como padrão do projeto? [S/n] (ou digite 'p' para personalizar): ")
+	answer, _ := reader.ReadString('\n')
+	answer = strings.TrimSpace(answer)
+
+	chosen := detected
+	switch answer {
+	case "", "S", "s":
+	case "p", "P", "n", "N":
+		var err error
+		chosen, err = selectStack(reader, out, envPath)
+		if err != nil {
+			return StackConfig{}, false, err
+		}
+	default:
+		return StackConfig{}, false, fmt.Errorf("opção inválida %q: responda S, n ou p", answer)
+	}
+
+	for k, v := range stackEnvValues(chosen) {
+		updates[k] = v
+	}
+	if err := writeProjectEnv(envPath, updates); err != nil {
+		return StackConfig{}, false, err
+	}
+	fmt.Fprintf(out, "[STACK] Stack salva como padrão do projeto: %s\n", chosen.Name)
+	return chosen, true, nil
+}
+
+// resolveRunStack resolve a stack de uma rodada da Forja: usa project.env em silêncio quando válido
+// (e forceSelect é falso); caso contrário abre o menu e salva a escolha.
+func resolveRunStack(reader *bufio.Reader, out io.Writer, envPath string, forceSelect bool) (StackConfig, error) {
+	if !forceSelect {
+		if s, err := loadProjectStack(envPath); err == nil {
+			fmt.Fprintf(out, "[INFO] Stack do projeto: %s (via project.env)\n", s.Name)
+			return s, nil
+		}
+	}
+	s, err := selectStack(reader, out, envPath)
+	if err != nil {
+		return StackConfig{}, err
+	}
+	if err := writeProjectEnv(envPath, stackEnvValues(s)); err != nil {
+		fmt.Fprintf(out, "[AVISO] Não foi possível salvar a stack em %s: %v\n", envPath, err)
+	}
+	return s, nil
 }
 
 func selectStack(reader *bufio.Reader, out io.Writer, envPath string) (StackConfig, error) {

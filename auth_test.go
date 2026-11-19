@@ -144,16 +144,19 @@ func TestValidateAuthConfig(t *testing.T) {
 		env  map[string]string
 		ok   bool
 	}{
-		{"VA-H1", "api_key", map[string]string{"LLM_API_KEY": "sk-123"}, true},
+		{"VA-H1", "api_key", map[string]string{"ANTHROPIC_API_KEY": "sk-ant"}, true},
 		{"VA-H2", "api_key", map[string]string{"FORGE_API_KEY": "sk-456"}, true},
 		{"VA-H3", "another", nil, true},
+		{"VA-H4", "api_key", map[string]string{"OPENAI_API_KEY": "sk-oai"}, true},
+		{"VA-H5", "api_key", map[string]string{"GEMINI_API_KEY": "gm-1"}, true},
 		{"VA-E1", "api_key", map[string]string{"FORGE_OMNIROUTE_ENABLED": "true"}, true},
 		{"VA-E2", "api_key", map[string]string{"FORGE_OMNIROUTE_ENABLED": "True"}, true},
-		{"VA-E3", "api_key", map[string]string{"LLM_API_KEY": "   "}, false},
+		{"VA-E3", "api_key", map[string]string{"ANTHROPIC_API_KEY": "   "}, false},
+		{"VA-E4", "api_key", map[string]string{"OPENAI_API_KEY": "\"\""}, false},
 		{"VA-X1", "api_key", nil, false},
 		{"VA-X2", "api_key", map[string]string{"FORGE_OMNIROUTE_ENABLED": "false"}, false},
-		{"VA-X3", "api_key", map[string]string{"ANTHROPIC_API_KEY": "sk-x"}, false},
-		{"VA-X4", "bogus", map[string]string{"LLM_API_KEY": "sk-123"}, false},
+		{"VA-X3", "api_key", map[string]string{"LLM_API_KEY": "sk-legacy"}, false},
+		{"VA-X4", "bogus", map[string]string{"ANTHROPIC_API_KEY": "sk-123"}, false},
 	}
 	for _, c := range cases {
 		t.Run(c.id, func(t *testing.T) {
@@ -169,15 +172,18 @@ func TestValidateAuthConfig(t *testing.T) {
 }
 
 func TestValidateAuthConfigMessageGuidesUser(t *testing.T) {
-	// VA-X5: mensagem clara instruindo models.env e LLM_API_KEY.
+	// VA-X5: mensagem clara instruindo project.env e as chaves dos provedores; sem LLM_API_KEY legada.
 	err := validateAuthConfig("api_key", fakeGetenv(nil))
 	if err == nil {
 		t.Fatal("esperado erro sem API key")
 	}
-	for _, s := range []string{".forge/config/models.env", "LLM_API_KEY"} {
+	for _, s := range []string{".forge/config/project.env", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"} {
 		if !strings.Contains(err.Error(), s) {
 			t.Fatalf("mensagem deve citar %q: %v", s, err)
 		}
+	}
+	if strings.Contains(err.Error(), "LLM_API_KEY") {
+		t.Fatalf("mensagem não deve citar a chave legada LLM_API_KEY: %v", err)
 	}
 }
 
@@ -185,32 +191,35 @@ func TestValidateAuthConfigMessageGuidesUser(t *testing.T) {
 // Task 2 — buildAgentEnv(base []string, authMode string, omni OmniRouteConfig, useOmni bool) []string
 // ---------------------------------------------------------------------------
 
-func TestBuildAgentEnvAPIKeyKeepsLLMKey(t *testing.T) {
-	// BE-H1
+func TestBuildAgentEnvAPIKeyStripsLegacyLLMKey(t *testing.T) {
+	// BE-H1: LLM_API_KEY (legada, vinha do models.env versionado) é removida e não vira ANTHROPIC_API_KEY.
 	base := []string{"PATH=/bin", "LLM_API_KEY=sk-1"}
 	got := buildAgentEnv(base, "api_key", testOmni, false)
-	assertEnvSingle(t, got, "LLM_API_KEY", "sk-1")
+	assertEnvAbsent(t, got, "LLM_API_KEY")
+	assertEnvAbsent(t, got, "ANTHROPIC_API_KEY")
 	assertEnvSingle(t, got, "PATH", "/bin")
 	assertEnvAbsent(t, got, "ANTHROPIC_BASE_URL")
 	assertEnvAbsent(t, got, "ANTHROPIC_AUTH_TOKEN")
 }
 
 func TestBuildAgentEnvAPIKeyFallsBackToForgeKey(t *testing.T) {
-	// BE-H2: LLM_API_KEY ausente => usa FORGE_API_KEY.
+	// BE-H2: ANTHROPIC_API_KEY ausente => usa FORGE_API_KEY; nunca recria LLM_API_KEY.
 	got := buildAgentEnv([]string{"FORGE_API_KEY=sk-forge"}, "api_key", testOmni, false)
-	assertEnvSingle(t, got, "LLM_API_KEY", "sk-forge")
+	assertEnvSingle(t, got, "ANTHROPIC_API_KEY", "sk-forge")
+	assertEnvAbsent(t, got, "LLM_API_KEY")
 }
 
 func TestBuildAgentEnvAPIKeyEmptyLLMUsesForgeKey(t *testing.T) {
-	// BE-E1: LLM_API_KEY vazia (só espaços) => substituída por FORGE_API_KEY, sem duplicar.
+	// BE-E1: LLM_API_KEY vazia é descartada; FORGE_API_KEY alimenta ANTHROPIC_API_KEY, sem duplicar.
 	got := buildAgentEnv([]string{"LLM_API_KEY=  ", "FORGE_API_KEY=sk-forge"}, "api_key", testOmni, false)
-	assertEnvSingle(t, got, "LLM_API_KEY", "sk-forge")
+	assertEnvAbsent(t, got, "LLM_API_KEY")
+	assertEnvSingle(t, got, "ANTHROPIC_API_KEY", "sk-forge")
 }
 
-func TestBuildAgentEnvAPIKeyPrefersLLMOverForge(t *testing.T) {
+func TestBuildAgentEnvAPIKeyPrefersAnthropicOverForge(t *testing.T) {
 	// BE-E2
-	got := buildAgentEnv([]string{"LLM_API_KEY=sk-llm", "FORGE_API_KEY=sk-forge"}, "api_key", testOmni, false)
-	assertEnvSingle(t, got, "LLM_API_KEY", "sk-llm")
+	got := buildAgentEnv([]string{"FORGE_API_KEY=sk-forge", "ANTHROPIC_API_KEY=sk-ant"}, "api_key", testOmni, false)
+	assertEnvSingle(t, got, "ANTHROPIC_API_KEY", "sk-ant")
 }
 
 func TestBuildAgentEnvAnotherRemovesLLMKey(t *testing.T) {
@@ -268,11 +277,9 @@ func TestModelsEnvDeclaresAuthAndOmniRoute(t *testing.T) {
 			t.Fatalf("models.env: %s = %q (presente=%v); want %q", k, got, ok, v)
 		}
 	}
-	if _, ok := env["LLM_API_KEY"]; !ok {
-		t.Fatal("models.env deve declarar LLM_API_KEY (vazia por padrão)")
-	}
-	if v := env["LLM_API_KEY"]; v != "" {
-		t.Fatal("models.env não pode versionar uma API key real (LLM_API_KEY deve ficar vazia)")
+	// As chaves de API residem exclusivamente em .forge/config/project.env (ver multi_llm_test.go).
+	if _, ok := env["LLM_API_KEY"]; ok {
+		t.Fatal("models.env não pode mais declarar LLM_API_KEY")
 	}
 }
 
@@ -291,7 +298,7 @@ func TestReadmesDocumentAPIKeyOmniRouteAndResume(t *testing.T) {
 	for _, file := range []string{"README.md", "README.pt-BR.md"} {
 		c := readRepoFile(t, file)
 		for _, s := range []string{
-			"LLM_API_KEY", ".forge/config/models.env", "OmniRoute",
+			"ANTHROPIC_API_KEY", ".forge/config/project.env", ".forge/config/models.env", "OmniRoute",
 			"FORGE_OMNIROUTE_ENABLED", "FORGE_OMNIROUTE_URL", "FORGE_OMNIROUTE_MODEL",
 			"-resume", "-demand", "-stage", "RESUME.env",
 		} {
@@ -314,7 +321,7 @@ func TestBuildAgentEnvInjectsAnthropicAPIKey(t *testing.T) {
 	}{
 		{"AK-H1", []string{"PATH=/bin", "ANTHROPIC_API_KEY=", "FORGE_API_KEY=sk-forge"}, "sk-forge"},
 		{"AK-H2", []string{"PATH=/bin", "FORGE_API_KEY=sk-forge"}, "sk-forge"},
-		{"AK-H3", []string{"LLM_API_KEY=sk-llm"}, "sk-llm"},
+		{"AK-H3", []string{"LLM_API_KEY=sk-llm", "ANTHROPIC_API_KEY=sk-ant"}, "sk-ant"},
 		{"AK-E1", []string{"ANTHROPIC_API_KEY=old", "ANTHROPIC_API_KEY=old2", "FORGE_API_KEY=sk-forge"}, "old"},
 		{"AK-E2", []string{"ANTHROPIC_API_KEY=  ", "FORGE_API_KEY=  \"sk-quoted\"  "}, "sk-quoted"},
 		{"AK-E3", []string{"ANTHROPIC_API_KEY='sk-single'"}, "sk-single"},

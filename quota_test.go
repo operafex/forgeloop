@@ -148,14 +148,14 @@ func TestRunAgentWithFallbackSuccessNoFallback(t *testing.T) {
 	var calls []fakeCall
 	var notify bytes.Buffer
 	run := fakeRunner([]fakeReply{{TokenStats{Input: 5, Output: 7, Total: 12}, "ok", nil}}, &calls)
-	res := runAgentWithFallback(fbAgent, "p", true, "api_key", testOmni, []string{"LLM_API_KEY=k"}, run, &notify)
+	res := runAgentWithFallback(fbAgent, "p", true, "api_key", testOmni, []string{"ANTHROPIC_API_KEY=k"}, run, &notify)
 	if res.Err != nil || res.Quota || res.UsedOmniRoute || res.Model != "gem" || res.Stats.Total != 12 || res.Output != "ok" {
 		t.Fatalf("resultado inesperado: %+v", res)
 	}
 	if len(calls) != 1 || calls[0].agent != fbAgent {
 		t.Fatalf("esperada 1 chamada com o binding original: %+v", calls)
 	}
-	assertEnvSingle(t, calls[0].env, "LLM_API_KEY", "k")
+	assertEnvSingle(t, calls[0].env, "ANTHROPIC_API_KEY", "k")
 	if notify.Len() != 0 {
 		t.Fatalf("não deveria avisar: %q", notify.String())
 	}

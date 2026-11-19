@@ -2,7 +2,7 @@
 
 # forgeloop
 
-A spec-driven **Loop Engineering** orchestrator with strict TDD and automated security auditing. Written in Go with **zero external dependencies** (standard library only) and designed to run 100% on OAuth-authenticated CLI sessions (`claude` and `agy`) — no API keys.
+A spec-driven **Loop Engineering** orchestrator with strict TDD and automated security auditing. Written in Go with **zero external dependencies** (standard library only).
 
 ## One Forge, Six Stages
 
@@ -24,7 +24,7 @@ Stages 3 → 4 → 5 run as a closed loop until the ARBITER approves, asks for a
 ## Requirements
 
 - Go 1.22+
-- `claude` and `agy` CLIs, logged in via OAuth
+- `claude` and `agy` CLIs
 - `npx` (Node.js) and `git`
 
 ## Quick Start
@@ -60,7 +60,14 @@ When running `-setup`, `forgeloop` deterministically inspects markers in the pro
 - `Gemfile` with `gem 'rails'` → Ruby on Rails (`bundle exec rspec` if `spec/` directory exists, otherwise `bin/rails test`, plus `bundle exec rubocop`);
 - `package.json` → Node.js or TypeScript + Node.js (if `tsconfig.json` exists or `typescript` is in dependencies/devDependencies; `npm run lint` if `lint` is defined in `scripts`).
 
-The `ONBOARDER` agent confirms or refines the detected stack, and the configuration is saved to `.forge/config/project.env`:
+During `-setup`, the detected stack is shown and you are asked to confirm it before anything is written:
+
+```text
+[STACK] Detectada: Go (testes: go test -v -race ./...)
+Confirmar esta stack como padrão do projeto? [S/n] (ou digite 'p' para personalizar): 
+```
+
+Enter, `S` or `s` confirms the detected stack; `p` (or `n`) opens the stack menu so you can pick a different stack; any other answer aborts the setup without writing. When no stack is detected, no question is asked. The `ONBOARDER` agent then confirms or refines the stack, and the configuration is saved to `.forge/config/project.env`:
 
 ```env
 FORGE_STACK_NAME="Go"
@@ -69,7 +76,19 @@ FORGE_TYPE_CMD="go vet ./..."
 FORGE_LINT_CMD=""
 ```
 
-When you start a demand with `-task`, `forgeloop` displays the saved stack as the default option:
+When you start a demand with `-task`, `-stage` or `-demand`, `forgeloop` uses the stack saved in `.forge/config/project.env` silently — no stack confirmation is required on each run:
+
+```text
+[INFO] Stack do projeto: Go (via project.env)
+```
+
+To change the stack, pass `-select-stack`: it opens the menu even when `project.env` is valid and saves your choice. The menu also opens automatically when `project.env` is missing or incomplete.
+
+```bash
+go run . -task "Implement JWT authentication" -select-stack
+```
+
+The `-select-stack` menu looks like this:
 
 ```text
 Qual stack deve ser utilizada nesta execução?
@@ -81,7 +100,7 @@ Qual stack deve ser utilizada nesta execução?
 Escolha uma opção (1-5) [Enter = 1]: 
 ```
 
-Pressing Enter defaults to option `1`. If `.forge/config/project.env` is missing or incomplete, a warning is displayed and the manual menu (options 1 to 4) is presented as fallback. You can also edit `.forge/config/project.env` manually to override commands or configure custom stacks (such as Python, Java, or Makefile).
+Pressing Enter defaults to option `1`. If `.forge/config/project.env` is missing or incomplete, a warning is displayed and the manual menu (options 1 to 4) is presented as fallback, and the chosen stack is saved. You can also edit `.forge/config/project.env` manually to override commands or configure custom stacks (such as Python, Java, or Makefile).
 
 ### 3. Run a new demand — `-task` (Stages 1 to 5)
 
@@ -101,9 +120,17 @@ go run . -task "Implement JWT authentication with refresh tokens" \
 Start from a later Stage with `-stage` (`-forge` is kept as a compatibility alias):
 
 ```bash
-go run . -stage 2    # TEMPER onwards (reuses the existing .forge/state/PLAN.md / tests)
+go run . -stage 2    # TEMPER onwards (reuses existing .forge/state/PLAN.md / tests)
 go run . -stage 3    # STRIKE onwards
 ```
+
+### Resuming Execution & Connecting Existing Demands
+
+You can resume interrupted runs or connect existing demands:
+
+- `-resume`: Restores the exact execution state saved in `.forge/state/RESUME.env` when a run is paused (e.g. on quota limits).
+- `-stage <1..5>`: Starts execution at any stage (1 to 5).
+- `-demand <file.md>`: Connects an existing demand from `<docsDir>/demands/` (e.g. `-demand 2026-11-17-feature.md`) without creating a duplicate record.
 
 ### 4. Try different model combinations
 
@@ -140,6 +167,24 @@ In addition to agents, `.forge/config/models.env` manages global loop settings:
 - `FORGE_MAX_ATTEMPTS`: Maximum attempts in the correction loop before circuit breaker trips (default: `3`).
 - `FORGE_DEFAULT_DOCS_DIR`: Default documentation directory (default: `docs`).
 
+### Authentication & OmniRoute Fallback
+
+By default (`FORGE_AUTH_MODE="api_key"`, set in `.forge/config/models.env`), agents authenticate with provider API keys that live **exclusively** in `.forge/config/project.env` (git-ignored, written with `0600` permissions), isolating costs per project:
+- `ANTHROPIC_API_KEY`: Anthropic key (`FORGE_API_KEY` is accepted as an alias).
+- `OPENAI_API_KEY`: OpenAI key.
+- `GEMINI_API_KEY`: Google Gemini key.
+
+All configured keys are injected into every agent subprocess. The `api_key` pre-flight check requires at least one of them (environment variables take precedence over the file). `forgeloop` prints a warning if any API key is found in the versioned `.forge/config/models.env`.
+
+When token or quota limits are reached, `forgeloop` can transparently route requests through `OmniRoute`:
+- `FORGE_OMNIROUTE_ENABLED`: Enables automatic OmniRoute fallback when set to `true` (default: `false`).
+- `FORGE_OMNIROUTE_URL`: OmniRoute server address (default: `http://localhost:20128`).
+- `FORGE_OMNIROUTE_MODEL`: Model routed via OmniRoute (default: `claude-sonnet-4-6`).
+
+### Cross-Auditing (Multi-LLM)
+
+Use up to 5 different models across the stages. It is strongly recommended to use at least 2 distinct providers — e.g. Anthropic for the BUILDER and OpenAI/Gemini for the ARBITER — to avoid confirmation bias when auditing the code. Configure each stage through `FORGE_<AGENT>_BIN` / `FORGE_<AGENT>_MODEL` in `.forge/config/models.env`, and store the matching provider keys in `.forge/config/project.env`.
+
 ### How to Customize
 
 Configuration precedence is: **CLI Flags > Environment Variables > `.forge/config/models.env` > Hardcoded defaults**.
@@ -175,6 +220,7 @@ Configuration precedence is: **CLI Flags > Environment Variables > `.forge/confi
 ├── config/                # models.env (versioned), project.env (git-ignored)
 ├── state/                 # transient artifacts: PLAN, TEST_CASES, DECISION, ... (git-ignored)
 └── telemetry/             # CSV metrics (header written on first use, then append-only)
+    ├── TELEMETRY.md       # .forge/telemetry/TELEMETRY.md: KPIs + run history, regenerated from the CSVs at the end of every Forge run
     ├── runs.csv           # one row per run: attempts, tokens in/out/total, final status
     └── events.csv         # one row per stage/agent execution: tokens, duration, attempt (joins runs.csv by RunID)
 ```
@@ -183,13 +229,16 @@ Logs contain the prompt and the full response of every agent, the complete test/
 
 ## Exit codes
 
+When the SKEPTIC answers `SPEC_STATUS: REVISION_REQUIRED`, the engine automatically goes back to Stage 1 (the ARCHITECT receives the review and fixes the plan and tests) until `-max-attempts` is reached; exit code `2` only happens when those attempts are exhausted.
+
 | Code | Meaning |
 | :--- | :--- |
 | `0` | `APPROVE_MERGE` (or a successful `-init`/`-setup`) |
 | `1` | Fatal error or circuit breaker tripped |
-| `2` | Specification blocked by the SKEPTIC (Stage 2) |
+| `2` | Specification blocked by the SKEPTIC (Stage 2) after exhausting `-max-attempts` |
 | `3` | `AMEND_TEST` — a Stage 1 test needs fixing |
 | `4` | `ESCALATE_ARCHITECT` |
+| `5` | Quota or token limit reached (state saved in `RESUME.env`, resumable with `-resume`) |
 
 ## Tests
 

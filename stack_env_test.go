@@ -43,8 +43,9 @@ func TestWriteProjectEnvCreatesFileAndParents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o644 {
-		t.Fatalf("permissão esperada 0644, veio %v", info.Mode().Perm())
+	// project.env guarda chaves de API: somente o dono pode ler/escrever.
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("permissão esperada 0600, veio %v", info.Mode().Perm())
 	}
 }
 

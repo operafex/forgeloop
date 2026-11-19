@@ -1,5 +1,6 @@
 # Artefatos transitórios de cada execução da Forge
 .forge/state/
+#.forge/telemetry/
 .forge/config/project.env
 
 #pastas de configuração
@@ -14,4 +15,6 @@ skills
 # Binário compilado
 /forgeloop
 
-/docs/
+docs/
+forgeloop
+.DS_Store

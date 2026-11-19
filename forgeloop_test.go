@@ -857,7 +857,10 @@ func TestResolveStage(t *testing.T) {
     {1, 2, false, true, 2, false}, // alias -forge
     {2, 2, true, true, 2, false},
     {2, 3, true, true, 0, true}, // divergentes
-    {4, 1, true, false, 0, true},
+    {4, 1, true, false, 4, false}, // retomada na Etapa 4 (SENTINEL)
+    {5, 1, true, false, 5, false}, // retomada na Etapa 5 (ARBITER)
+    {1, 5, false, true, 5, false}, // alias -forge também aceita 1..5
+    {6, 1, true, false, 0, true},
     {1, 0, false, true, 0, true},
   }
   for _, c := range cases {

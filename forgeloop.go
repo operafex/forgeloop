@@ -69,10 +69,12 @@ func main() {
 
   setupMode := flag.Bool("setup", false, "Etapa 0 (Discovery): analisa projeto existente e mapeia documentação")
   taskFlag := flag.String("task", "", "Descrição da nova demanda (salva automaticamente em /docs/demands/)")
+  demandFlag := flag.String("demand", "", "Arquivo de demanda existente em <docsDir>/demands/ (ex.: 2026-11-17-x.md)")
+  resumeFlag := flag.Bool("resume", false, "Retoma a execução interrompida a partir de .forge/state/RESUME.env")
   initMode := flag.Bool("init", false, "Verifica binários, instala skills ausentes (npx skills add) e cria a estrutura de pastas")
   forceSkills := flag.Bool("force-skills", false, "Com -init: reinstala/atualiza todas as skills configuradas, mesmo as já presentes")
-  stageFlag := flag.Int("stage", 1, "Etapa inicial da Forja: 1 (ciclo completo), 2 (Temper/Skeptic), 3 (Strike/Builder)")
-  forgeAlias := flag.Int("forge", 1, "Alias de compatibilidade para -stage")
+  stageFlag := flag.Int("stage", 1, "Etapa inicial da Forja: 1 a 5 (1: Blueprint, 2: Temper, 3: Strike, 4: Quench, 5: Assay)")
+  forgeAlias := flag.Int("forge", 1, "Alias de compatibilidade para -stage (1 a 5)")
   maxAttempts := flag.Int("max-attempts", getEnvInt("FORGE_MAX_ATTEMPTS", 3), "Limite máximo de tentativas no loop (Circuit Breaker)")
   docsDirFlag := flag.String("docs-dir", getEnv("FORGE_DOCS_DIR", getEnv("FORGE_DEFAULT_DOCS_DIR", "docs")), "Diretório de documentação")
   var refFlags stringList
@@ -111,9 +113,9 @@ func main() {
 
   setFlags := map[string]bool{}
   flag.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
-  startStage, stageErr := resolveStage(*stageFlag, *forgeAlias, setFlags["stage"], setFlags["forge"])
-  if stageErr != nil {
-    fatal("%v", stageErr)
+
+  if err := validateRunFlags(*taskFlag, *demandFlag, *resumeFlag, setFlags["stage"] || setFlags["forge"]); err != nil {
+    fatal("%v", err)
   }
 
   if err := ensureForgeDirs(); err != nil {
@@ -141,6 +143,15 @@ func main() {
     return
   }
 
+  authMode, err := resolveAuthMode(os.Getenv("FORGE_AUTH_MODE"))
+  if err != nil {
+    fatal("%v", err)
+  }
+  if err := validateAuthConfig(authMode, os.Getenv); err != nil {
+    fatal("%v", err)
+  }
+  omni := loadOmniRouteConfig(os.Getenv)
+
   // =========================================================================
   // ETAPA 0 — DISCOVERY (-setup): ANÁLISE DE PROJETO EXISTENTE
   // =========================================================================
@@ -150,13 +161,65 @@ func main() {
     return
   }
 
-  stack, err := selectStack(reader, os.Stdout, projectEnvPath)
-  if err != nil {
-    fatal("%v", err)
-  }
   docsDir := strings.Trim(strings.TrimSpace(*docsDirFlag), "/")
   if docsDir == "" {
     docsDir = "docs"
+  }
+
+  var (
+    startStage   int
+    firstAttempt = 1
+    stack        StackConfig
+    demandFile   string
+    task         = strings.TrimSpace(*taskFlag)
+  )
+
+  if *resumeFlag {
+    st, err := loadResumeState(resumeEnvPath)
+    if err != nil {
+      fatal("%v", err)
+    }
+    startStage = st.Stage
+    firstAttempt = st.Attempt
+    if strings.TrimSpace(st.Demand) != "" {
+      df, err := resolveDemandFlag(st.Demand, docsDir)
+      if err != nil {
+        fatal("%v", err)
+      }
+      demandFile = df
+    }
+    resStack, err := resumeStack(st.Stack, projectEnvPath, ".")
+    if err != nil {
+      fatal("%v", err)
+    }
+    stack = resStack
+  } else {
+    var stageErr error
+    startStage, stageErr = resolveStage(*stageFlag, *forgeAlias, setFlags["stage"], setFlags["forge"])
+    if stageErr != nil {
+      fatal("%v", stageErr)
+    }
+
+    if *demandFlag != "" {
+      df, err := resolveDemandFlag(*demandFlag, docsDir)
+      if err != nil {
+        fatal("%v", err)
+      }
+      demandFile = df
+    }
+
+    s, err := selectStack(reader, os.Stdout, projectEnvPath)
+    if err != nil {
+      fatal("%v", err)
+    }
+    stack = s
+  }
+
+  if demandFile != "" {
+    t, err := demandTitle(demandFile)
+    if err == nil && (startStage == 1 || task == "") {
+      task = t
+    }
   }
 
   refs, refErr := resolveReferences(refFlags, docsDir)
@@ -168,8 +231,7 @@ func main() {
     refs = nil
   }
 
-  task := strings.TrimSpace(*taskFlag)
-  if startStage == 1 && task == "" {
+  if startStage == 1 && task == "" && demandFile == "" {
     fmt.Print("\nDescreva a nova demanda ou feature: ")
     input, _ := reader.ReadString('\n')
     task = strings.TrimSpace(input)
@@ -192,8 +254,7 @@ func main() {
     logName = runLog.Name
   }
 
-  demandFile := ""
-  if task != "" {
+  if demandFile == "" && task != "" {
     demandFile = registerDemandInDocs(docsDir, stack.Name, task, modelsSummary, logName, refs)
     fmt.Printf("\n[DOCS] Demanda registrada em: %s\n", demandFile)
   }
@@ -212,10 +273,30 @@ func main() {
   printBanner("A FORJA (FORGELOOP) INICIADA",
     fmt.Sprintf("Stack: %s | Docs: /%s | Max Tentativas: %d\nBindings: %s", stack.Name, docsDir, *maxAttempts, modelsSummary))
 
+  handleQuotaPause := func(stage int, stageLabel string, res AgentResult, attempt int) {
+    st := ResumeState{
+      Stage:   stage,
+      Demand:  demandFile,
+      Stack:   stack.Name,
+      Attempt: attempt,
+    }
+    if err := writeResumeState(resumeEnvPath, st); err != nil {
+      fatal("Erro ao salvar estado de retomada: %v", err)
+    }
+    report := quotaInterruptionReport(st, stageLabel, formatResetETA(time.Now(), res.ResetIn, res.HasReset))
+    fmt.Print(report)
+    logBlock("INTERRUPÇÃO POR COTA/TOKENS", report)
+    if demandFile != "" {
+      updateDemandStatus(demandFile, "QUOTA_PAUSED", attempt, totalTokens)
+    }
+    recordRunTelemetry(runID, stack.Name, demandFile, *maxAttempts, attempt, totalTokens, "QUOTA_PAUSED", "Limite de cota/tokens atingido")
+    finish(exitQuota)
+  }
+
   // =========================================================================
   // ETAPA 1 — BLUEPRINT: ARCHITECT (Spec-TDD-Planner / Superpowers)
   // =========================================================================
-  if startStage <= 1 {
+  if shouldRunStage(1, startStage, 1, 1) {
     printBanner("ETAPA 1: BLUEPRINT — ARCHITECT", fmt.Sprintf("Skill: %s | Modelo: %s (%s)", architect.Skill, architect.Model, architect.Bin))
     prompt := fmt.Sprintf(
       "Siga estritamente as instruções de @.forge/agents/01_ARCHITECT.md aplicando a skill %s. "+
@@ -226,19 +307,22 @@ func main() {
     )
     prompt += referencesPrompt(refs)
     start := time.Now()
-    stats, err := runAgent(architect, prompt, *jsonMetrics)
-    recordEventTelemetry(runID, "F1", architect.Alias, architect.Model, 1, stats, time.Since(start).Seconds())
-    totalTokens.Add(stats)
-    if err != nil {
-      fatal("Falha na Etapa 1 (ARCHITECT): %v", err)
+    res := runAgentStep(architect, prompt, *jsonMetrics, authMode, omni)
+    recordEventTelemetry(runID, "F1", architect.Alias, res.Model, 1, res.Stats, time.Since(start).Seconds())
+    totalTokens.Add(res.Stats)
+    if res.Quota {
+      handleQuotaPause(1, architect.Forge+": "+architect.Stage, res, 1)
     }
-    reportTokens(architect, stats)
+    if res.Err != nil {
+      fatal("Falha na Etapa 1 (ARCHITECT): %v", res.Err)
+    }
+    reportTokens(architect, res.Stats)
   }
 
   // =========================================================================
   // ETAPA 2 — TEMPER: SKEPTIC (Cold-Global-Lens / Elephant-Goldfish)
   // =========================================================================
-  if startStage <= 2 {
+  if shouldRunStage(2, startStage, 1, 1) {
     printBanner("ETAPA 2: TEMPER — SKEPTIC", fmt.Sprintf("Skill: %s | Modelo: %s (%s)", skeptic.Skill, skeptic.Model, skeptic.Bin))
     prompt := fmt.Sprintf(
       "Siga estritamente as instruções de @.forge/agents/02_SKEPTIC.md aplicando a skill %s. "+
@@ -248,13 +332,16 @@ func main() {
     )
 
     start := time.Now()
-    stats, err := runAgent(skeptic, prompt, *jsonMetrics)
-    recordEventTelemetry(runID, "F2", skeptic.Alias, skeptic.Model, 1, stats, time.Since(start).Seconds())
-    totalTokens.Add(stats)
-    if err != nil {
-      fatal("Falha na Etapa 2 (SKEPTIC): %v", err)
+    res := runAgentStep(skeptic, prompt, *jsonMetrics, authMode, omni)
+    recordEventTelemetry(runID, "F2", skeptic.Alias, res.Model, 1, res.Stats, time.Since(start).Seconds())
+    totalTokens.Add(res.Stats)
+    if res.Quota {
+      handleQuotaPause(2, skeptic.Forge+": "+skeptic.Stage, res, 1)
     }
-    reportTokens(skeptic, stats)
+    if res.Err != nil {
+      fatal("Falha na Etapa 2 (SKEPTIC): %v", res.Err)
+    }
+    reportTokens(skeptic, res.Stats)
 
     reviewContent, err := readFile(".forge/state/SPEC_REVIEW.md")
     if err != nil {
@@ -274,127 +361,151 @@ func main() {
   // =========================================================================
   // LOOP FECHADO: ETAPA 3 (STRIKE) -> ETAPA 4 (QUENCH) -> ETAPA 5 (ASSAY)
   // =========================================================================
-  for attempt := 1; attempt <= *maxAttempts; attempt++ {
+  var checksPassed bool
+  for attempt := firstAttempt; attempt <= *maxAttempts; attempt++ {
     // ETAPA 3 — STRIKE: BUILDER (Contexto Limpo)
-    printBanner(fmt.Sprintf("ETAPA 3: STRIKE — BUILDER (Tentativa %d/%d)", attempt, *maxAttempts),
-      fmt.Sprintf("Contexto Higienizado | Modelo: %s (%s)", builder.Model, builder.Bin))
+    if shouldRunStage(3, startStage, attempt, firstAttempt) {
+      printBanner(fmt.Sprintf("ETAPA 3: STRIKE — BUILDER (Tentativa %d/%d)", attempt, *maxAttempts),
+        fmt.Sprintf("Contexto Higienizado | Modelo: %s (%s)", builder.Model, builder.Bin))
 
-    execPrompt := fmt.Sprintf(
-      "Siga estritamente as instruções de @.forge/agents/03_BUILDER.md. Diretório de docs: %s/. "+
-        "Leia @.forge/state/PLAN.md e @.forge/state/TEST_CASES.md e implemente as Tasks no código de produção.",
-      docsDir,
-    )
-    if attempt > 1 {
-      execPrompt += " ATENÇÃO: Rodada de correção. Leia @.forge/state/DECISION.md, @.forge/state/VERIFY_REPORT.md e @.forge/state/SECURITY_REPORT.md e corrija todos os apontamentos."
-    }
-
-    bStart := time.Now()
-    bStats, err := runAgent(builder, execPrompt, *jsonMetrics)
-    recordEventTelemetry(runID, "F3", builder.Alias, builder.Model, attempt, bStats, time.Since(bStart).Seconds())
-    totalTokens.Add(bStats)
-    if err != nil {
-      fatal("Falha na Etapa 3 (BUILDER): %v (verifique FORGE_BUILDER_MODEL/FORGE_BUILDER_BIN em .forge/config/models.env)", err)
-    }
-    reportTokens(builder, bStats)
-
-    // ETAPA 4A — QUENCH TESTS: Verificação Determinística
-    printBanner(fmt.Sprintf("ETAPA 4A: QUENCH TESTS (Tentativa %d/%d)", attempt, *maxAttempts),
-      fmt.Sprintf("Runner Determinístico (%s)", stack.Name))
-    checksPassed := runDeterministicChecks(stack)
-
-    // ETAPA 4B — QUENCH APPSEC: SENTINEL
-    printBanner(fmt.Sprintf("ETAPA 4B: QUENCH APPSEC — SENTINEL (Tentativa %d/%d)", attempt, *maxAttempts),
-      fmt.Sprintf("Skill: %s | Modelo: %s", sentinel.Skill, sentinel.Model))
-
-    secPrompt := fmt.Sprintf(
-      "Siga estritamente as instruções de @.forge/agents/04_SENTINEL.md aplicando a skill %s. "+
-        "Audite o git diff atual e grave o relatório em .forge/state/SECURITY_REPORT.md.",
-      sentinel.Skill,
-    )
-    secReportPath := ".forge/state/SECURITY_REPORT.md"
-    var secModBefore time.Time
-    if fi, statErr := os.Stat(secReportPath); statErr == nil {
-      secModBefore = fi.ModTime()
-    }
-    sStart := time.Now()
-    sStats, err := runAgent(sentinel, secPrompt, *jsonMetrics)
-    recordEventTelemetry(runID, "F4B", sentinel.Alias, sentinel.Model, attempt, sStats, time.Since(sStart).Seconds())
-    totalTokens.Add(sStats)
-    if err != nil {
-      fmt.Printf("[AVISO] SENTINEL (AppSec) retornou erro de processo: %v\n", err)
-      logEvent("AVISO: SENTINEL retornou erro de processo: %v", err)
-    }
-    if secContent, readErr := readFile(secReportPath); readErr == nil {
-      logBlock(".forge/state/SECURITY_REPORT.md (tentativa "+strconv.Itoa(attempt)+")", secContent)
-    }
-    if fi, statErr := os.Stat(secReportPath); statErr != nil {
-      fmt.Printf("[AVISO] SENTINEL não gerou %s. A auditoria de segurança NÃO foi registrada (verifique permissões em FORGE_SENTINEL_ARGS).\n", secReportPath)
-    } else if !secModBefore.IsZero() && !fi.ModTime().After(secModBefore) {
-      fmt.Printf("[AVISO] SENTINEL não atualizou %s nesta tentativa; o relatório é de uma execução anterior.\n", secReportPath)
-    }
-    reportTokens(sentinel, sStats)
-
-    // ETAPA 5 — ASSAY: ARBITER (Juiz Semântico & Circuit Breaker)
-    printBanner(fmt.Sprintf("ETAPA 5: ASSAY — ARBITER (Tentativa %d/%d)", attempt, *maxAttempts),
-      fmt.Sprintf("Modelo: %s (%s)", arbiter.Model, arbiter.Bin))
-
-    arbPrompt := fmt.Sprintf(
-      "Siga estritamente as instruções de @.forge/agents/05_ARBITER.md. "+
-        "Esta é a tentativa ATTEMPT: %d de %d. "+
-        "Analise @.forge/state/PLAN.md, @.forge/state/TEST_CASES.md, @.forge/state/VERIFY_REPORT.md, @.forge/state/SECURITY_REPORT.md e execute git diff. "+
-        "Grave seu veredito em .forge/state/DECISION.md.",
-      attempt, *maxAttempts,
-    )
-
-    aStart := time.Now()
-    aStats, err := runAgent(arbiter, arbPrompt, *jsonMetrics)
-    recordEventTelemetry(runID, "F5", arbiter.Alias, arbiter.Model, attempt, aStats, time.Since(aStart).Seconds())
-    totalTokens.Add(aStats)
-    if err != nil {
-      fatal("Falha na Etapa 5 (ARBITER): %v", err)
-    }
-    reportTokens(arbiter, aStats)
-    fmt.Printf("[TOKENS ACUMULADOS NA FORJA] %s\n", totalTokens.Format())
-    logEvent("TOKENS ACUMULADOS NA FORJA: %s", totalTokens.Format())
-
-    decisionContent, err := readFile(".forge/state/DECISION.md")
-    if err != nil {
-      fatal("Não foi possível ler .forge/state/DECISION.md: %v", err)
-    }
-    logBlock(".forge/state/DECISION.md (tentativa "+strconv.Itoa(attempt)+")", decisionContent)
-
-    switch {
-    case strings.Contains(decisionContent, "DECISION: APPROVE_MERGE"):
-      updateDemandStatus(demandFile, "APPROVED", attempt, totalTokens)
-      recordRunTelemetry(runID, stack.Name, demandFile, *maxAttempts, attempt, totalTokens, "APPROVED", "Testes, AppSec e Diff-Judge aprovados")
-      printBanner("A FORJA CONCLUÍDA — APPROVE_MERGE",
-        fmt.Sprintf("Aprovado em %d tentativa(s) | Gasto Total: %s", attempt, totalTokens.Format()))
-      finish(0)
-
-    case strings.Contains(decisionContent, "DECISION: AMEND_TEST"):
-      updateDemandStatus(demandFile, "AMEND_TEST", attempt, totalTokens)
-      recordRunTelemetry(runID, stack.Name, demandFile, *maxAttempts, attempt, totalTokens, "AMEND_TEST", "Erro detectado no teste da Etapa 1")
-      printBanner("INTERVENÇÃO NECESSÁRIA — AMEND_TEST", "O ARBITER identificou bug em um teste da Etapa 1. Revise .forge/state/DECISION.md.")
-      finish(3)
-
-    case strings.Contains(decisionContent, "DECISION: ESCALATE_ARCHITECT"):
-      updateDemandStatus(demandFile, "ESCALATE_ARCHITECT", attempt, totalTokens)
-      recordRunTelemetry(runID, stack.Name, demandFile, *maxAttempts, attempt, totalTokens, "ESCALATE_ARCHITECT", "Escalonado para revisão arquitetural")
-      printBanner("CIRCUIT BREAKER — ESCALATE_ARCHITECT", "Falha estrutural ou limite atingido. Consulte .forge/state/DECISION.md.")
-      finish(4)
-
-    case strings.Contains(decisionContent, "DECISION: RETRY_EXECUTION"):
-      if !checksPassed {
-        fmt.Println("\n[LOOP] Testes falharam na Etapa 4A. Reiniciando Etapa 3 (Strike) com contexto limpo...")
-      } else {
-        fmt.Println("\n[LOOP] Apontamento de segurança ou qualidade semântica. Reiniciando Etapa 3 (Strike)...")
+      execPrompt := fmt.Sprintf(
+        "Siga estritamente as instruções de @.forge/agents/03_BUILDER.md. Diretório de docs: %s/. "+
+          "Leia @.forge/state/PLAN.md e @.forge/state/TEST_CASES.md e implemente as Tasks no código de produção.",
+        docsDir,
+      )
+      if attempt > 1 {
+        execPrompt += " ATENÇÃO: Rodada de correção. Leia @.forge/state/DECISION.md, @.forge/state/VERIFY_REPORT.md e @.forge/state/SECURITY_REPORT.md e corrija todos os apontamentos."
       }
-      continue
 
-    default:
-      updateDemandStatus(demandFile, "UNKNOWN_VERDICT", attempt, totalTokens)
-      recordRunTelemetry(runID, stack.Name, demandFile, *maxAttempts, attempt, totalTokens, "UNKNOWN_VERDICT", "Veredito não reconhecido")
-      fatal("Veredito não reconhecido em .forge/state/DECISION.md.")
+      bStart := time.Now()
+      res := runAgentStep(builder, execPrompt, *jsonMetrics, authMode, omni)
+      recordEventTelemetry(runID, "F3", builder.Alias, res.Model, attempt, res.Stats, time.Since(bStart).Seconds())
+      totalTokens.Add(res.Stats)
+      if res.Quota {
+        handleQuotaPause(3, builder.Forge+": "+builder.Stage, res, attempt)
+      }
+      if res.Err != nil {
+        fatal("Falha na Etapa 3 (BUILDER): %v (verifique FORGE_BUILDER_MODEL/FORGE_BUILDER_BIN em .forge/config/models.env)", res.Err)
+      }
+      reportTokens(builder, res.Stats)
+    }
+
+    // ETAPA 4A & 4B — QUENCH
+    if shouldRunStage(4, startStage, attempt, firstAttempt) {
+      // ETAPA 4A — QUENCH TESTS: Verificação Determinística
+      printBanner(fmt.Sprintf("ETAPA 4A: QUENCH TESTS (Tentativa %d/%d)", attempt, *maxAttempts),
+        fmt.Sprintf("Runner Determinístico (%s)", stack.Name))
+      checksPassed = runDeterministicChecks(stack)
+
+      // ETAPA 4B — QUENCH APPSEC: SENTINEL
+      printBanner(fmt.Sprintf("ETAPA 4B: QUENCH APPSEC — SENTINEL (Tentativa %d/%d)", attempt, *maxAttempts),
+        fmt.Sprintf("Skill: %s | Modelo: %s", sentinel.Skill, sentinel.Model))
+
+      secPrompt := fmt.Sprintf(
+        "Siga estritamente as instruções de @.forge/agents/04_SENTINEL.md aplicando a skill %s. "+
+          "Audite o git diff atual e grave o relatório em .forge/state/SECURITY_REPORT.md.",
+        sentinel.Skill,
+      )
+      secReportPath := ".forge/state/SECURITY_REPORT.md"
+      var secModBefore time.Time
+      if fi, statErr := os.Stat(secReportPath); statErr == nil {
+        secModBefore = fi.ModTime()
+      }
+      sStart := time.Now()
+      res := runAgentStep(sentinel, secPrompt, *jsonMetrics, authMode, omni)
+      recordEventTelemetry(runID, "F4B", sentinel.Alias, res.Model, attempt, res.Stats, time.Since(sStart).Seconds())
+      totalTokens.Add(res.Stats)
+      if res.Quota {
+        handleQuotaPause(4, sentinel.Forge+": "+sentinel.Stage, res, attempt)
+      }
+      if res.Err != nil {
+        fmt.Printf("[AVISO] SENTINEL (AppSec) retornou erro de processo: %v\n", res.Err)
+        logEvent("AVISO: SENTINEL retornou erro de processo: %v", res.Err)
+      }
+      if secContent, readErr := readFile(secReportPath); readErr == nil {
+        logBlock(".forge/state/SECURITY_REPORT.md (tentativa "+strconv.Itoa(attempt)+")", secContent)
+      }
+      if fi, statErr := os.Stat(secReportPath); statErr != nil {
+        fmt.Printf("[AVISO] SENTINEL não gerou %s. A auditoria de segurança NÃO foi registrada (verifique permissões em FORGE_SENTINEL_ARGS).\n", secReportPath)
+      } else if !secModBefore.IsZero() && !fi.ModTime().After(secModBefore) {
+        fmt.Printf("[AVISO] SENTINEL não atualizou %s nesta tentativa; o relatório é de uma execução anterior.\n", secReportPath)
+      }
+      reportTokens(sentinel, res.Stats)
+    }
+
+    // ETAPA 5 — ASSAY: ARBITER
+    if shouldRunStage(5, startStage, attempt, firstAttempt) {
+      if startStage == 5 && attempt == firstAttempt {
+        if content, err := readFile(".forge/state/VERIFY_REPORT.md"); err == nil {
+          checksPassed = strings.Contains(content, "ALL_CHECKS_PASSED")
+        }
+      }
+
+      printBanner(fmt.Sprintf("ETAPA 5: ASSAY — ARBITER (Tentativa %d/%d)", attempt, *maxAttempts),
+        fmt.Sprintf("Modelo: %s (%s)", arbiter.Model, arbiter.Bin))
+
+      arbPrompt := fmt.Sprintf(
+        "Siga estritamente as instruções de @.forge/agents/05_ARBITER.md. "+
+          "Esta é a tentativa ATTEMPT: %d de %d. "+
+          "Analise @.forge/state/PLAN.md, @.forge/state/TEST_CASES.md, @.forge/state/VERIFY_REPORT.md, @.forge/state/SECURITY_REPORT.md e execute git diff. "+
+          "Grave seu veredito em .forge/state/DECISION.md.",
+        attempt, *maxAttempts,
+      )
+
+      aStart := time.Now()
+      res := runAgentStep(arbiter, arbPrompt, *jsonMetrics, authMode, omni)
+      recordEventTelemetry(runID, "F5", arbiter.Alias, res.Model, attempt, res.Stats, time.Since(aStart).Seconds())
+      totalTokens.Add(res.Stats)
+      if res.Quota {
+        handleQuotaPause(5, arbiter.Forge+": "+arbiter.Stage, res, attempt)
+      }
+      if res.Err != nil {
+        fatal("Falha na Etapa 5 (ARBITER): %v", res.Err)
+      }
+      reportTokens(arbiter, res.Stats)
+      fmt.Printf("[TOKENS ACUMULADOS NA FORJA] %s\n", totalTokens.Format())
+      logEvent("TOKENS ACUMULADOS NA FORJA: %s", totalTokens.Format())
+
+      decisionContent, err := readFile(".forge/state/DECISION.md")
+      if err != nil {
+        fatal("Não foi possível ler .forge/state/DECISION.md: %v", err)
+      }
+      logBlock(".forge/state/DECISION.md (tentativa "+strconv.Itoa(attempt)+")", decisionContent)
+
+      switch {
+      case strings.Contains(decisionContent, "DECISION: APPROVE_MERGE"):
+        clearResumeState(resumeEnvPath)
+        updateDemandStatus(demandFile, "APPROVED", attempt, totalTokens)
+        recordRunTelemetry(runID, stack.Name, demandFile, *maxAttempts, attempt, totalTokens, "APPROVED", "Testes, AppSec e Diff-Judge aprovados")
+        printBanner("A FORJA CONCLUÍDA — APPROVE_MERGE",
+          fmt.Sprintf("Aprovado em %d tentativa(s) | Gasto Total: %s", attempt, totalTokens.Format()))
+        finish(0)
+
+      case strings.Contains(decisionContent, "DECISION: AMEND_TEST"):
+        updateDemandStatus(demandFile, "AMEND_TEST", attempt, totalTokens)
+        recordRunTelemetry(runID, stack.Name, demandFile, *maxAttempts, attempt, totalTokens, "AMEND_TEST", "Erro detectado no teste da Etapa 1")
+        printBanner("INTERVENÇÃO NECESSÁRIA — AMEND_TEST", "O ARBITER identificou bug em um teste da Etapa 1. Revise .forge/state/DECISION.md.")
+        finish(3)
+
+      case strings.Contains(decisionContent, "DECISION: ESCALATE_ARCHITECT"):
+        updateDemandStatus(demandFile, "ESCALATE_ARCHITECT", attempt, totalTokens)
+        recordRunTelemetry(runID, stack.Name, demandFile, *maxAttempts, attempt, totalTokens, "ESCALATE_ARCHITECT", "Escalonado para revisão arquitetural")
+        printBanner("CIRCUIT BREAKER — ESCALATE_ARCHITECT", "Falha estrutural ou limite atingido. Consulte .forge/state/DECISION.md.")
+        finish(4)
+
+      case strings.Contains(decisionContent, "DECISION: RETRY_EXECUTION"):
+        if !checksPassed {
+          fmt.Println("\n[LOOP] Testes falharam na Etapa 4A. Reiniciando Etapa 3 (Strike) com contexto limpo...")
+        } else {
+          fmt.Println("\n[LOOP] Apontamento de segurança ou qualidade semântica. Reiniciando Etapa 3 (Strike)...")
+        }
+        continue
+
+      default:
+        updateDemandStatus(demandFile, "UNKNOWN_VERDICT", attempt, totalTokens)
+        recordRunTelemetry(runID, stack.Name, demandFile, *maxAttempts, attempt, totalTokens, "UNKNOWN_VERDICT", "Veredito não reconhecido")
+        fatal("Veredito não reconhecido em .forge/state/DECISION.md.")
+      }
     }
   }
 
@@ -666,20 +777,35 @@ func agentLabel(a AgentBinding) string {
   return fmt.Sprintf("%s — %s | %s", stage, a.Alias, a.Model)
 }
 
-// runAgent executa o agente (com spinner no console) e registra prompt, resposta completa e duração no log.
+// runAgent executa o agente preservando a assinatura legada (utilizada no setup da Etapa 0 e testes legados).
 func runAgent(agent AgentBinding, prompt string, tryJSON bool) (TokenStats, error) {
-  label := agentLabel(agent)
-  start := time.Now()
-  logBlock("PROMPT ENVIADO — "+label, prompt)
-
-  stats, text, err := runAgentCore(agent, label, prompt, tryJSON)
-
-  logBlock("RESPOSTA RECEBIDA — "+label, text)
-  logEvent("%s concluído em %s (erro: %v)", label, formatElapsed(time.Since(start)), err)
-  return stats, err
+  mode, err := resolveAuthMode(os.Getenv("FORGE_AUTH_MODE"))
+  if err != nil {
+    mode = authModeAPIKey
+  }
+  res := runAgentStep(agent, prompt, tryJSON, mode, loadOmniRouteConfig(os.Getenv))
+  return res.Stats, res.Err
 }
 
-func runAgentCore(agent AgentBinding, label, prompt string, tryJSON bool) (TokenStats, string, error) {
+// runAgentStep executa uma etapa de agente com telemetria, fallback OmniRoute e registro limpo de logs.
+func runAgentStep(agent AgentBinding, prompt string, tryJSON bool, authMode string, omni OmniRouteConfig) AgentResult {
+  runner := func(a AgentBinding, env []string, p string, tj bool) (TokenStats, string, error) {
+    label := agentLabel(a)
+    start := time.Now()
+    logBlock("PROMPT ENVIADO — "+label, p)
+    stats, text, err := runAgentCore(a, label, p, tj, env)
+    logBlock("RESPOSTA RECEBIDA — "+label, text)
+    logEvent("%s concluído em %s (erro: %v)", label, formatElapsed(time.Since(start)), err)
+    return stats, text, err
+  }
+  return runAgentWithFallback(agent, prompt, tryJSON, authMode, omni, os.Environ(), runner, yellowWriter(os.Stdout))
+}
+
+func runAgentCore(agent AgentBinding, label, prompt string, tryJSON bool, env []string) (TokenStats, string, error) {
+  if env == nil {
+    // Nunca deixar o subprocesso herdar o ambiente cru: aplica a mesma montagem de autenticação.
+    env = agentEnvFromProcess()
+  }
   baseArgs := []string{}
   if strings.TrimSpace(agent.Model) != "" {
     baseArgs = append(baseArgs, "--model", agent.Model)
@@ -690,7 +816,7 @@ func runAgentCore(agent AgentBinding, label, prompt string, tryJSON bool) (Token
   // A saída do agente é sempre capturada (nunca transmitida ao vivo) enquanto o spinner redesenha a linha;
   // ela só é impressa depois que o spinner limpa a linha.
   run := func(args []string) (out string, err error) {
-    withSpinner(label, func() { out, err = execCapture(agent.Bin, args) })
+    withSpinner(label, func() { out, err = execCaptureEnv(agent.Bin, args, env) })
     return out, err
   }
 
@@ -729,14 +855,32 @@ func isUnsupportedFlagError(output string) bool {
   return unsupportedFlagRe.MatchString(output)
 }
 
-// execCapture executa o comando capturando stdout+stderr (sem escrever no console).
-func execCapture(bin string, args []string) (string, error) {
+// execCaptureEnv executa o comando capturando stdout+stderr (sem escrever no console), permitindo passar variáveis de ambiente customizadas.
+func execCaptureEnv(bin string, args, env []string) (string, error) {
   cmd := exec.Command(bin, args...)
+  if env != nil {
+    cmd.Env = env
+  }
   var buf bytes.Buffer
   cmd.Stdout = &buf
   cmd.Stderr = &buf
   err := cmd.Run()
   return buf.String(), err
+}
+
+// execCapture executa o comando capturando stdout+stderr (sem escrever no console).
+func execCapture(bin string, args []string) (string, error) {
+  return execCaptureEnv(bin, args, agentEnvFromProcess())
+}
+
+// agentEnvFromProcess monta o ambiente do subprocesso a partir de os.Environ() (já com models.env/project.env carregados)
+// usando o modo de autenticação configurado.
+func agentEnvFromProcess() []string {
+  mode, err := resolveAuthMode(os.Getenv("FORGE_AUTH_MODE"))
+  if err != nil {
+    mode = authModeAPIKey
+  }
+  return buildAgentEnv(os.Environ(), mode, loadOmniRouteConfig(os.Getenv), false)
 }
 
 func parseJSONUsage(raw string) (text string, stats TokenStats, hasUsage bool, ok bool) {
@@ -933,6 +1077,7 @@ func loadEnvFile(path string) {
     if line == "" || strings.HasPrefix(line, "#") {
       continue
     }
+    line = strings.TrimSpace(strings.TrimPrefix(line, "export "))
     parts := strings.SplitN(line, "=", 2)
     if len(parts) != 2 {
       continue
@@ -1298,8 +1443,8 @@ func resolveStage(stage, forge int, stageSet, forgeSet bool) (int, error) {
   if !stageSet && forgeSet {
     v = forge
   }
-  if v < 1 || v > 3 {
-    return 0, fmt.Errorf("etapa inicial inválida: %d (use 1, 2 ou 3)", v)
+  if v < 1 || v > 5 {
+    return 0, fmt.Errorf("etapa inicial inválida: %d (use 1 a 5)", v)
   }
   return v, nil
 }
